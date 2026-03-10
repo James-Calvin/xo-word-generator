@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Love Language Word Generator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app">
+    <h1>Love Language Word Generator</h1>
+
+    <section class="controls" aria-label="Generation settings">
+      <div class="controls-left">
+        <div class="control-item">
+          <label for="minSyllables">Min syllables</label>
+          <input id="minSyllables" type="number" min="1" max="12" value="1">
+        </div>
+        <div class="control-item">
+          <label for="maxSyllables">Max syllables</label>
+          <input id="maxSyllables" type="number" min="1" max="12" value="3">
+        </div>
+      </div>
+      <a class="ipa-link" href="https://ipa-reader.com/" target="_blank" rel="noopener noreferrer">Open IPA Reader</a>
+    </section>
+
+    <button id="generateBtn" class="generate-btn" type="button">Generate</button>
+
+    <section class="results-section" aria-live="polite">
+      <h2>Generated Words</h2>
+      <ol id="results" class="results-list"></ol>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
