@@ -66,6 +66,7 @@ class RuleEngine {
   constructor() {
     this.transitionRules = [];
     this.wordEndBans = new Set();
+    this.syllableEndBans = new Set();
   }
 
   addWordRule(triggerSymbol, blockedNextSymbols) {
@@ -82,6 +83,10 @@ class RuleEngine {
 
   addWordEndBan(symbol) {
     this.wordEndBans.add(symbol);
+  }
+
+  addSyllableEndBan(symbol) {
+    this.syllableEndBans.add(symbol);
   }
 
   addTransitionRule(scope, triggerSymbol, blockedNextSymbols) {
@@ -132,6 +137,10 @@ class RuleEngine {
 
   isWordEndBanned(symbol) {
     return this.wordEndBans.has(symbol);
+  }
+
+  isSyllableEndBanned(symbol) {
+    return this.syllableEndBans.has(symbol);
   }
 }
 
@@ -546,8 +555,13 @@ function addWordEndBan(symbol) {
   ruleEngine.addWordEndBan(symbol);
 }
 
-addWordEndBan("y");
-addWordEndBan("ñ");
+function addSyllableEndBan(symbol) {
+  ruleEngine.addSyllableEndBan(symbol);
+}
+
+addSyllableEndBan("y");
+addSyllableEndBan("ñ");
+addSyllableEndBan("j")
 
 function buildWord(min, max) {
   const syllableCount = Math.floor(Math.random() * (max - min + 1)) + min;
@@ -565,7 +579,14 @@ function buildWord(min, max) {
 
   for (let i = 0; i < slots.length; i += 1) {
     const slot = slots[i];
-    const candidates = poolManager.getCandidates(slot.type);
+    let candidates = poolManager.getCandidates(slot.type);
+    const slotEndsSyllable =
+      slot.relationToNext === RELATIONS.BOUNDARY || slot.relationToNext === RELATIONS.NONE;
+
+    if (slotEndsSyllable) {
+      candidates = candidates.filter((candidate) => !ruleEngine.isSyllableEndBanned(candidate.symbol));
+    }
+
     if (candidates.length === 0) {
       poolManager.resetWordAttempt();
       return null;
