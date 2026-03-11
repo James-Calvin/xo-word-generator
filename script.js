@@ -49,17 +49,113 @@ const minInput = document.getElementById("minSyllables");
 const maxInput = document.getElementById("maxSyllables");
 const generateBtn = document.getElementById("generateBtn");
 const resultsList = document.getElementById("results");
+
 const generatedWords = new Set();
-
+const rowStateById = new Map();
 const audioCache = new Map();
+const copyFeedbackTimers = new Map();
 const sharedAudio = new Audio();
-const copyFeedbackTimers = new WeakMap();
 
-let selectedRow = null;
-let activePlayButton = null;
+let selectedRowId = null;
+let playingRowId = null;
+let awsInitPromise = null;
 
 function randomFrom(list) {
   return list[Math.floor(Math.random() * list.length)];
+}
+
+function trimOrEmpty(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function createRowId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+
+  return `row-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeAwsConfig(rawConfig) {
+  const source = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+
+  const region = typeof source.region === "string" ? source.region.trim() : "";
+  const identityPoolId = typeof source.identityPoolId === "string" ? source.identityPoolId.trim() : "";
+  const heartsTableName =
+    typeof source.heartsTableName === "string" ? source.heartsTableName.trim() : "";
+
+  const voiceId =
+    typeof source.voiceId === "string" && source.voiceId.trim()
+      ? source.voiceId.trim()
+      : DEFAULT_VOICE_ID;
+  const engine =
+    typeof source.engine === "string" && source.engine.trim()
+      ? source.engine.trim()
+      : DEFAULT_ENGINE;
+  const outputFormat =
+    typeof source.outputFormat === "string" && source.outputFormat.trim()
+      ? source.outputFormat.trim()
+      : DEFAULT_OUTPUT_FORMAT;
+
+  return {
+    region,
+    identityPoolId,
+    heartsTableName,
+    voiceId,
+    engine,
+    outputFormat
+  };
+}
+
+function getAudioMimeType(outputFormat) {
+  if (outputFormat === "ogg_vorbis") {
+    return "audio/ogg";
+  }
+
+  if (outputFormat === "pcm") {
+    return "audio/wav";
+  }
+
+  return "audio/mpeg";
+}
+
+function escapeXml(text) {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function decodeBase64(base64Text) {
+  const binary = atob(base64Text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function toAudioBlob(audioStream, outputFormat) {
+  const mimeType = getAudioMimeType(outputFormat);
+
+  if (audioStream instanceof ArrayBuffer) {
+    return new Blob([audioStream], { type: mimeType });
+  }
+
+  if (ArrayBuffer.isView(audioStream)) {
+    return new Blob(
+      [new Uint8Array(audioStream.buffer, audioStream.byteOffset, audioStream.byteLength)],
+      { type: mimeType }
+    );
+  }
+
+  if (typeof audioStream === "string") {
+    return new Blob([decodeBase64(audioStream)], { type: mimeType });
+  }
+
+  return null;
 }
 
 class RuleEngine {
@@ -100,6 +196,7 @@ class RuleEngine {
 
   resolveBlockedNextSymbols(triggerSymbol, relationToNext) {
     const blocked = [];
+
     for (const rule of this.transitionRules) {
       if (rule.triggerSymbol !== triggerSymbol) {
         continue;
@@ -275,229 +372,517 @@ function clampSyllables() {
   return { min, max };
 }
 
-function normalizeAwsConfig(rawConfig) {
-  if (!rawConfig || typeof rawConfig !== "object") {
+const awsConfig = normalizeAwsConfig(window.LOVE_LANGUAGE_AWS_CONFIG);
+const hasAwsSdk =
+  typeof window.AWS !== "undefined" &&
+  typeof window.AWS.Polly !== "undefined" &&
+  typeof window.AWS.CognitoIdentityCredentials !== "undefined";
+
+const isPlaybackConfigured = Boolean(hasAwsSdk && awsConfig.region && awsConfig.identityPoolId);
+const hasDocumentClient = Boolean(
+  hasAwsSdk &&
+    typeof window.AWS.DynamoDB !== "undefined" &&
+    typeof window.AWS.DynamoDB.DocumentClient !== "undefined"
+);
+const isHeartsConfigured = Boolean(isPlaybackConfigured && hasDocumentClient && awsConfig.heartsTableName);
+
+let pollyClient = null;
+let heartsTableClient = null;
+
+function getPollyClient() {
+  if (!isPlaybackConfigured) {
     return null;
   }
 
-  const region = typeof rawConfig.region === "string" ? rawConfig.region.trim() : "";
-  const identityPoolId =
-    typeof rawConfig.identityPoolId === "string" ? rawConfig.identityPoolId.trim() : "";
+  if (!pollyClient) {
+    pollyClient = new window.AWS.Polly({ apiVersion: "2016-06-10", region: awsConfig.region });
+  }
 
-  if (!region || !identityPoolId) {
+  return pollyClient;
+}
+
+function getHeartsTableClient() {
+  if (!isHeartsConfigured) {
     return null;
   }
 
-  const voiceId =
-    typeof rawConfig.voiceId === "string" && rawConfig.voiceId.trim()
-      ? rawConfig.voiceId.trim()
-      : DEFAULT_VOICE_ID;
-  const engine =
-    typeof rawConfig.engine === "string" && rawConfig.engine.trim()
-      ? rawConfig.engine.trim()
-      : DEFAULT_ENGINE;
-  const outputFormat =
-    typeof rawConfig.outputFormat === "string" && rawConfig.outputFormat.trim()
-      ? rawConfig.outputFormat.trim()
-      : DEFAULT_OUTPUT_FORMAT;
+  if (!heartsTableClient) {
+    heartsTableClient = new window.AWS.DynamoDB.DocumentClient({ region: awsConfig.region });
+  }
 
-  return { region, identityPoolId, voiceId, engine, outputFormat };
+  return heartsTableClient;
 }
 
-function getAudioMimeType(outputFormat) {
-  if (outputFormat === "ogg_vorbis") {
-    return "audio/ogg";
-  }
-
-  if (outputFormat === "pcm") {
-    return "audio/wav";
-  }
-
-  return "audio/mpeg";
-}
-
-function escapeXml(text) {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-function decodeBase64(base64Text) {
-  const binary = atob(base64Text);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function toAudioBlob(audioStream, outputFormat) {
-  const mimeType = getAudioMimeType(outputFormat);
-  if (audioStream instanceof ArrayBuffer) {
-    return new Blob([audioStream], { type: mimeType });
-  }
-
-  if (ArrayBuffer.isView(audioStream)) {
-    return new Blob(
-      [new Uint8Array(audioStream.buffer, audioStream.byteOffset, audioStream.byteLength)],
-      { type: mimeType }
-    );
-  }
-
-  if (typeof audioStream === "string") {
-    return new Blob([decodeBase64(audioStream)], { type: mimeType });
-  }
-
-  return null;
-}
-
-function createPollyService() {
-  const awsConfig = normalizeAwsConfig(window.LOVE_LANGUAGE_AWS_CONFIG);
-  const hasAwsSdk =
-    typeof window.AWS !== "undefined" &&
-    typeof window.AWS.Polly !== "undefined" &&
-    typeof window.AWS.CognitoIdentityCredentials !== "undefined";
-
-  if (!awsConfig || !hasAwsSdk) {
-    return {
-      enabled: false,
-      synthesize: async () => null
-    };
-  }
-
-  window.AWS.config.update({ region: awsConfig.region });
-  window.AWS.config.credentials = new window.AWS.CognitoIdentityCredentials({
-    IdentityPoolId: awsConfig.identityPoolId
-  });
-
-  const polly = new window.AWS.Polly({
-    apiVersion: "2016-06-10",
-    region: awsConfig.region
-  });
-
-  async function synthesize(word, ipa) {
-    const cacheKey = [
-      word,
-      ipa,
-      awsConfig.region,
-      awsConfig.voiceId,
-      awsConfig.engine,
-      awsConfig.outputFormat
-    ].join("|");
-
-    if (audioCache.has(cacheKey)) {
-      return audioCache.get(cacheKey);
+function refreshAwsCredentials() {
+  return new Promise((resolve, reject) => {
+    if (!window.AWS.config.credentials) {
+      reject(new Error("Missing AWS credentials configuration."));
+      return;
     }
 
-    const ssml = `<speak><phoneme alphabet="ipa" ph="${escapeXml(ipa)}">${escapeXml(
-      word
-    )}</phoneme></speak>`;
+    window.AWS.config.credentials.get((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
 
-    const params = {
+      resolve();
+    });
+  });
+}
+
+function ensureAwsCredentials() {
+  if (!isPlaybackConfigured) {
+    return Promise.resolve(false);
+  }
+
+  if (!awsInitPromise) {
+    awsInitPromise = (async () => {
+      window.AWS.config.update({
+        region: awsConfig.region,
+        credentials: new window.AWS.CognitoIdentityCredentials({
+          IdentityPoolId: awsConfig.identityPoolId
+        })
+      });
+
+      await refreshAwsCredentials();
+      const credentials = window.AWS.config.credentials;
+
+      const currentPollyClient = getPollyClient();
+      if (currentPollyClient && credentials) {
+        currentPollyClient.config.update({
+          region: awsConfig.region,
+          credentials
+        });
+      }
+
+      const currentHeartsClient = getHeartsTableClient();
+      if (currentHeartsClient && currentHeartsClient.service && credentials) {
+        currentHeartsClient.service.config.update({
+          region: awsConfig.region,
+          credentials
+        });
+      }
+
+      return true;
+    })().catch((error) => {
+      console.error("Failed to initialize AWS credentials.", error);
+      awsInitPromise = null;
+      return false;
+    });
+  }
+
+  return awsInitPromise;
+}
+
+async function getIdentityId() {
+  const ready = await ensureAwsCredentials();
+  if (!ready) {
+    throw new Error("AWS guest credentials are unavailable.");
+  }
+
+  const credentials = window.AWS.config.credentials;
+  if (!credentials) {
+    throw new Error("Missing AWS credentials object.");
+  }
+
+  if (!credentials.identityId || credentials.expired) {
+    await refreshAwsCredentials();
+  }
+
+  if (!credentials.identityId) {
+    throw new Error("Could not resolve Cognito identity ID.");
+  }
+
+  return credentials.identityId;
+}
+
+async function synthesize(word, ipa) {
+  const currentPollyClient = getPollyClient();
+  if (!isPlaybackConfigured || !currentPollyClient) {
+    return null;
+  }
+
+  const ready = await ensureAwsCredentials();
+  if (!ready) {
+    return null;
+  }
+
+  const cacheKey = [
+    word,
+    ipa,
+    awsConfig.region,
+    awsConfig.voiceId,
+    awsConfig.engine,
+    awsConfig.outputFormat
+  ].join("|");
+
+  if (audioCache.has(cacheKey)) {
+    return audioCache.get(cacheKey);
+  }
+
+  const ssml = `<speak><phoneme alphabet="ipa" ph="${escapeXml(ipa)}">${escapeXml(
+    word
+  )}</phoneme></speak>`;
+
+  const data = await currentPollyClient
+    .synthesizeSpeech({
       OutputFormat: awsConfig.outputFormat,
       TextType: "ssml",
       Text: ssml,
       VoiceId: awsConfig.voiceId,
       Engine: awsConfig.engine
-    };
+    })
+    .promise();
 
-    const data = await polly.synthesizeSpeech(params).promise();
-    const audioBlob = toAudioBlob(data.AudioStream, awsConfig.outputFormat);
-    if (!audioBlob) {
-      throw new Error("Polly returned an unsupported audio stream payload.");
-    }
-
-    const objectUrl = URL.createObjectURL(audioBlob);
-    audioCache.set(cacheKey, objectUrl);
-    return objectUrl;
+  const audioBlob = toAudioBlob(data.AudioStream, awsConfig.outputFormat);
+  if (!audioBlob) {
+    throw new Error("Polly returned an unsupported audio stream payload.");
   }
 
-  return {
-    enabled: true,
-    synthesize
-  };
+  const objectUrl = URL.createObjectURL(audioBlob);
+  audioCache.set(cacheKey, objectUrl);
+  return objectUrl;
+}
+
+async function createHeartRecord(state) {
+  const currentHeartsTableClient = getHeartsTableClient();
+  if (!isHeartsConfigured || !currentHeartsTableClient) {
+    throw new Error("Hearts persistence is not configured.");
+  }
+
+  const now = Date.now();
+  state.user = state.user || (await getIdentityId());
+  state.updatedTimestamp = now;
+  state.unheartedTimestamp = null;
+  state.hearted = true;
+
+  await currentHeartsTableClient
+    .put({
+      TableName: awsConfig.heartsTableName,
+      Item: buildHeartTableItem(state)
+    })
+    .promise();
+
+  state.hasPersistedRecord = true;
+}
+
+async function updateHeartRecord(state, hearted) {
+  const currentHeartsTableClient = getHeartsTableClient();
+  if (!isHeartsConfigured || !currentHeartsTableClient) {
+    throw new Error("Hearts persistence is not configured.");
+  }
+
+  const now = Date.now();
+  const unheartedTimestamp = hearted ? null : now;
+  state.user = state.user || (await getIdentityId());
+  state.hearted = hearted;
+  state.updatedTimestamp = now;
+  state.unheartedTimestamp = unheartedTimestamp;
+
+  await currentHeartsTableClient
+    .put({
+      TableName: awsConfig.heartsTableName,
+      Item: buildHeartTableItem(state)
+    })
+    .promise();
+}
+
+async function updateMeaningRecord(state, meaning) {
+  const currentHeartsTableClient = getHeartsTableClient();
+  if (!isHeartsConfigured || !currentHeartsTableClient) {
+    throw new Error("Hearts persistence is not configured.");
+  }
+
+  state.user = state.user || (await getIdentityId());
+  state.meaning = meaning;
+  state.updatedTimestamp = Date.now();
+
+  await currentHeartsTableClient
+    .put({
+      TableName: awsConfig.heartsTableName,
+      Item: buildHeartTableItem(state)
+    })
+    .promise();
+}
+
+async function persistHeartedState(state, hearted) {
+  if (!state.hasPersistedRecord) {
+    if (hearted) {
+      await createHeartRecord(state);
+    }
+    return;
+  }
+
+  await updateHeartRecord(state, hearted);
 }
 
 function clearSelection() {
-  if (selectedRow) {
-    selectedRow.classList.remove("is-selected");
-    selectedRow = null;
-  }
-}
-
-function selectRow(row) {
-  if (selectedRow === row) {
+  if (!selectedRowId) {
     return;
   }
 
-  clearSelection();
-  selectedRow = row;
-  selectedRow.classList.add("is-selected");
+  const previous = selectedRowId;
+  selectedRowId = null;
+  renderRow(previous);
 }
 
-function resetButtonIcon(button) {
-  if (button && button.dataset.icon) {
-    button.textContent = button.dataset.icon;
-  }
+function buildHeartTableItem(state) {
+  return {
+    rowId: state.rowId,
+    timestamp: state.timestamp,
+    user: state.user || null,
+    word: state.word,
+    pronunciation: state.ipa,
+    meaning: state.meaning || null,
+    hearted: Boolean(state.hearted),
+    updatedTimestamp: state.updatedTimestamp,
+    unheartedTimestamp: state.unheartedTimestamp ?? null
+  };
 }
 
-function clearPlayState(button = activePlayButton) {
-  if (!button) {
+function stopAudio() {
+  sharedAudio.pause();
+  sharedAudio.currentTime = 0;
+  clearPlayState();
+}
+
+function setSelectedRow(rowId) {
+  if (!rowId || selectedRowId === rowId) {
     return;
   }
 
-  button.classList.remove("is-loading", "is-playing");
-  resetButtonIcon(button);
+  const previous = selectedRowId;
+  selectedRowId = rowId;
 
-  if (button === activePlayButton) {
-    activePlayButton = null;
+  if (playingRowId && playingRowId !== rowId) {
+    stopAudio();
   }
+
+  if (previous) {
+    renderRow(previous);
+  }
+
+  renderRow(rowId);
 }
 
-function createActionButton(className, icon, label) {
+function clearPlayState() {
+  if (!playingRowId) {
+    return;
+  }
+
+  const previous = playingRowId;
+  playingRowId = null;
+  renderRow(previous);
+}
+
+function createActionButton(className, icon, label, action) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `action-btn ${className}`;
   button.dataset.icon = icon;
+  button.dataset.action = action;
   button.textContent = icon;
   button.setAttribute("aria-label", label);
   return button;
 }
 
-function createResultRow(generated, playbackEnabled) {
+function createRowState(generated) {
+  return {
+    rowId: generated.rowId,
+    timestamp: generated.timestamp,
+    updatedTimestamp: generated.timestamp,
+    unheartedTimestamp: null,
+    user: "",
+    word: generated.word,
+    ipa: generated.ipa,
+    hearted: false,
+    meaning: null,
+    draftMeaning: "",
+    hasDraftCache: false,
+    isEditing: false,
+    saveStatus: "idle",
+    copyFlash: false,
+    hasPersistedRecord: false
+  };
+}
+
+function createResultRow(state) {
   const item = document.createElement("li");
   item.className = "result-row";
-  item.dataset.word = generated.word;
-  item.dataset.ipa = generated.ipa;
+  item.dataset.rowId = state.rowId;
+  item.dataset.word = state.word;
+  item.dataset.ipa = state.ipa;
 
   const actions = document.createElement("div");
   actions.className = "row-actions";
 
-  const copyButton = createActionButton("copy-btn", "⧉", "Copy symbols");
-  const playButton = createActionButton("play-btn", "▶", "Play pronunciation");
-  if (!playbackEnabled) {
+  const heartButton = createActionButton("heart-btn", "♡", "Save word", "toggle-heart");
+  if (!isHeartsConfigured) {
+    heartButton.classList.add("is-hidden");
+  }
+
+  const copyButton = createActionButton("copy-btn", "⧉", "Copy symbols", "copy-word");
+
+  const playButton = createActionButton("play-btn", "▶", "Play pronunciation", "play-pronunciation");
+  if (!isPlaybackConfigured) {
     playButton.classList.add("is-hidden");
   }
 
-  actions.append(copyButton, playButton);
+  actions.append(heartButton, copyButton, playButton);
 
   const content = document.createElement("div");
   content.className = "row-content";
 
   const wordSpan = document.createElement("span");
   wordSpan.className = "word";
-  wordSpan.textContent = generated.word;
+  wordSpan.textContent = state.word;
 
   const ipaSpan = document.createElement("span");
   ipaSpan.className = "ipa";
-  ipaSpan.textContent = `/${generated.ipa}/`;
+  ipaSpan.textContent = `/${state.ipa}/`;
 
   content.append(wordSpan, ipaSpan);
-  item.append(actions, content);
+
+  const meaning = document.createElement("div");
+  meaning.className = "row-meaning";
+
+  item.append(actions, content, meaning);
   return item;
+}
+
+function renderMeaning(row, state) {
+  const container = row.querySelector(".row-meaning");
+  if (!container) {
+    return;
+  }
+
+  container.textContent = "";
+  const isSelected = selectedRowId === state.rowId;
+  const isSaving = state.saveStatus !== "idle";
+
+  if (state.meaning) {
+    const definition = document.createElement("span");
+    definition.className = "meaning-definition";
+    definition.textContent = `Definition: ${state.meaning}`;
+    container.appendChild(definition);
+  }
+
+  if (!isHeartsConfigured || !state.hearted) {
+    return;
+  }
+
+  if (state.isEditing && isSelected) {
+    const editor = document.createElement("div");
+    editor.className = "meaning-editor";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "meaning-input";
+    input.placeholder = "What does this word mean?";
+    input.value = state.draftMeaning;
+
+    const saveButton = createActionButton("meaning-action is-save", "✓", "Save meaning", "save-meaning");
+    const cancelButton = createActionButton(
+      "meaning-action",
+      "✕",
+      "Cancel meaning edit",
+      "cancel-meaning"
+    );
+
+    if (isSaving) {
+      input.disabled = true;
+      saveButton.disabled = true;
+      cancelButton.disabled = true;
+    }
+
+    editor.append(input, saveButton, cancelButton);
+    container.appendChild(editor);
+
+    window.requestAnimationFrame(() => {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+    return;
+  }
+
+  if (!isSelected) {
+    return;
+  }
+
+  const link = document.createElement("button");
+  link.type = "button";
+  link.className = "meaning-link";
+  link.dataset.action = "open-meaning-editor";
+  link.textContent = state.meaning ? "Edit" : "Add a meaning";
+  link.disabled = isSaving;
+  container.appendChild(link);
+}
+
+function renderRow(rowId) {
+  const state = rowStateById.get(rowId);
+  const row = resultsList.querySelector(`.result-row[data-row-id="${rowId}"]`);
+  if (!state || !row) {
+    return;
+  }
+
+  row.classList.toggle("is-selected", selectedRowId === rowId);
+
+  const heartButton = row.querySelector(".heart-btn");
+  if (heartButton) {
+    heartButton.classList.toggle("is-hearted", state.hearted);
+    heartButton.textContent = state.hearted ? "♥" : "♡";
+    heartButton.setAttribute("aria-label", state.hearted ? "Remove saved word" : "Save word");
+    heartButton.disabled = state.saveStatus !== "idle";
+  }
+
+  const copyButton = row.querySelector(".copy-btn");
+  if (copyButton) {
+    copyButton.classList.toggle("is-success", state.copyFlash);
+    copyButton.textContent = state.copyFlash ? "✓" : copyButton.dataset.icon;
+  }
+
+  const playButton = row.querySelector(".play-btn");
+  if (playButton) {
+    const isPlaying = playingRowId === rowId;
+    playButton.classList.toggle("is-playing", isPlaying);
+    playButton.classList.remove("is-loading");
+    playButton.textContent = isPlaying ? "■" : playButton.dataset.icon;
+  }
+
+  renderMeaning(row, state);
+}
+
+function clearCopyFeedback(rowId) {
+  const timer = copyFeedbackTimers.get(rowId);
+  if (timer) {
+    clearTimeout(timer);
+    copyFeedbackTimers.delete(rowId);
+  }
+}
+
+function showCopySuccess(rowId) {
+  const state = rowStateById.get(rowId);
+  if (!state) {
+    return;
+  }
+
+  clearCopyFeedback(rowId);
+  state.copyFlash = true;
+  renderRow(rowId);
+
+  const timer = window.setTimeout(() => {
+    const current = rowStateById.get(rowId);
+    if (!current) {
+      return;
+    }
+
+    current.copyFlash = false;
+    renderRow(rowId);
+    copyFeedbackTimers.delete(rowId);
+  }, COPY_FEEDBACK_MS);
+
+  copyFeedbackTimers.set(rowId, timer);
 }
 
 async function copyTextToClipboard(text) {
@@ -517,27 +902,201 @@ async function copyTextToClipboard(text) {
   document.body.removeChild(helper);
 }
 
-function showCopySuccess(button) {
-  const priorTimer = copyFeedbackTimers.get(button);
-  if (priorTimer) {
-    clearTimeout(priorTimer);
+async function playPronunciation(rowId) {
+  if (!isPlaybackConfigured) {
+    return;
   }
 
-  button.classList.add("is-success");
-  button.textContent = "✓";
+  const state = rowStateById.get(rowId);
+  const row = resultsList.querySelector(`.result-row[data-row-id="${rowId}"]`);
+  if (!state || !row) {
+    return;
+  }
 
-  const timer = window.setTimeout(() => {
-    button.classList.remove("is-success");
-    resetButtonIcon(button);
-    copyFeedbackTimers.delete(button);
-  }, COPY_FEEDBACK_MS);
+  const button = row.querySelector(".play-btn");
+  if (!button || button.classList.contains("is-hidden")) {
+    return;
+  }
 
-  copyFeedbackTimers.set(button, timer);
+  if (playingRowId === rowId && !sharedAudio.paused) {
+    stopAudio();
+    return;
+  }
+
+  if (playingRowId && playingRowId !== rowId) {
+    stopAudio();
+  }
+
+  button.classList.add("is-loading");
+  button.textContent = "…";
+
+  try {
+    const audioUrl = await synthesize(state.word, state.ipa);
+    if (!audioUrl) {
+      button.classList.remove("is-loading");
+      button.textContent = button.dataset.icon;
+      return;
+    }
+
+    sharedAudio.pause();
+    sharedAudio.currentTime = 0;
+    sharedAudio.src = audioUrl;
+
+    await sharedAudio.play();
+
+    playingRowId = rowId;
+    renderRow(rowId);
+  } catch (error) {
+    button.classList.remove("is-loading");
+    button.textContent = button.dataset.icon;
+    console.error("Failed to synthesize or play pronunciation.", error);
+  }
+}
+
+async function handleToggleHeart(rowId) {
+  const state = rowStateById.get(rowId);
+  if (!state || !isHeartsConfigured) {
+    return;
+  }
+
+  const previousHearted = state.hearted;
+  const previousEditing = state.isEditing;
+
+  if (state.hearted) {
+    state.hearted = false;
+  } else {
+    state.hearted = true;
+  }
+
+  state.isEditing = false;
+  state.saveStatus = "saving-heart";
+  renderRow(rowId);
+
+  try {
+    await persistHeartedState(state, state.hearted);
+  } catch (error) {
+    state.hearted = previousHearted;
+    state.isEditing = previousEditing;
+    console.error("Failed to persist heart state.", error);
+  } finally {
+    state.saveStatus = "idle";
+    renderRow(rowId);
+  }
+}
+
+function openMeaningEditor(rowId) {
+  const state = rowStateById.get(rowId);
+  if (!state || !state.hearted || !isHeartsConfigured) {
+    return;
+  }
+
+  if (!state.hasDraftCache) {
+    state.draftMeaning = state.meaning || "";
+    state.hasDraftCache = true;
+  }
+
+  state.isEditing = true;
+  renderRow(rowId);
+}
+
+function closeMeaningEditor(rowId) {
+  const state = rowStateById.get(rowId);
+  if (!state) {
+    return;
+  }
+
+  state.isEditing = false;
+  renderRow(rowId);
+}
+
+async function handleSaveMeaning(rowId) {
+  const state = rowStateById.get(rowId);
+  if (!state || !state.hearted || !isHeartsConfigured) {
+    return;
+  }
+
+  const trimmedMeaning = trimOrEmpty(state.draftMeaning);
+  if (!trimmedMeaning) {
+    closeMeaningEditor(rowId);
+    return;
+  }
+
+  const previousMeaning = state.meaning;
+  const previousEditing = state.isEditing;
+
+  state.meaning = trimmedMeaning;
+  state.draftMeaning = trimmedMeaning;
+  state.hasDraftCache = true;
+  state.isEditing = false;
+  state.saveStatus = "saving-meaning";
+  renderRow(rowId);
+
+  try {
+    if (!state.hasPersistedRecord) {
+      await persistHeartedState(state, true);
+    }
+
+    await updateMeaningRecord(state, trimmedMeaning);
+  } catch (error) {
+    state.meaning = previousMeaning;
+    state.isEditing = previousEditing;
+    console.error("Failed to save meaning.", error);
+  } finally {
+    state.saveStatus = "idle";
+    renderRow(rowId);
+  }
+}
+
+function handleMeaningInput(event) {
+  const input = event.target.closest(".meaning-input");
+  if (!input) {
+    return;
+  }
+
+  const row = input.closest(".result-row");
+  if (!row) {
+    return;
+  }
+
+  const state = rowStateById.get(row.dataset.rowId);
+  if (!state) {
+    return;
+  }
+
+  state.draftMeaning = input.value;
+  state.hasDraftCache = true;
+}
+
+function handleMeaningInputKeydown(event) {
+  const input = event.target.closest(".meaning-input");
+  if (!input) {
+    return;
+  }
+
+  const row = input.closest(".result-row");
+  if (!row) {
+    return;
+  }
+
+  const rowId = row.dataset.rowId;
+  if (!rowId) {
+    return;
+  }
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void handleSaveMeaning(rowId);
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeMeaningEditor(rowId);
+  }
 }
 
 const ruleEngine = new RuleEngine();
 const poolManager = new PoolManager(vowels, consonants);
-const pollyService = createPollyService();
 
 function addWordRule(triggerSymbol, blockedNextSymbols) {
   ruleEngine.addWordRule(triggerSymbol, blockedNextSymbols);
@@ -561,7 +1120,7 @@ function addSyllableEndBan(symbol) {
 
 addSyllableEndBan("y");
 addSyllableEndBan("ñ");
-addSyllableEndBan("j")
+addSyllableEndBan("j");
 
 function buildWord(min, max) {
   const syllableCount = Math.floor(Math.random() * (max - min + 1)) + min;
@@ -614,6 +1173,8 @@ function buildWord(min, max) {
   }
 
   return {
+    rowId: createRowId(),
+    timestamp: Date.now(),
     word: symbolsBySyllable.map((syllable) => syllable.join("")).join(""),
     ipa: ipaBySyllable.map((syllable) => syllable.join("")).join("."),
     symbols,
@@ -632,75 +1193,34 @@ function generateUniqueWord(min, max) {
   return null;
 }
 
-async function playPronunciation(row, button) {
-  if (!pollyService.enabled || button.classList.contains("is-hidden")) {
-    return;
-  }
-
-  if (activePlayButton === button && !sharedAudio.paused) {
-    sharedAudio.pause();
-    sharedAudio.currentTime = 0;
-    clearPlayState(button);
-    return;
-  }
-
-  if (activePlayButton && activePlayButton !== button) {
-    clearPlayState(activePlayButton);
-  }
-
-  sharedAudio.pause();
-  sharedAudio.currentTime = 0;
-
-  button.classList.add("is-loading");
-  button.textContent = "…";
-
-  try {
-    const word = row.dataset.word || "";
-    const ipa = row.dataset.ipa || "";
-    const audioUrl = await pollyService.synthesize(word, ipa);
-    if (!audioUrl) {
-      clearPlayState(button);
-      return;
+function removeOldestRowsIfNeeded() {
+  while (resultsList.children.length > MAX_RESULTS) {
+    const oldest = resultsList.lastElementChild;
+    if (!oldest) {
+      break;
     }
 
-    sharedAudio.src = audioUrl;
-    await sharedAudio.play();
+    const oldestWord = oldest.dataset.word;
+    const oldestRowId = oldest.dataset.rowId;
 
-    button.classList.remove("is-loading");
-    button.classList.add("is-playing");
-    button.textContent = "■";
-    activePlayButton = button;
-  } catch (error) {
-    clearPlayState(button);
-    console.error("Failed to synthesize or play pronunciation.", error);
-  }
-}
-
-async function handleResultListClick(event) {
-  const row = event.target.closest(".result-row");
-  if (!row || !resultsList.contains(row)) {
-    return;
-  }
-
-  selectRow(row);
-
-  const actionButton = event.target.closest(".action-btn");
-  if (!actionButton) {
-    return;
-  }
-
-  if (actionButton.classList.contains("copy-btn")) {
-    try {
-      await copyTextToClipboard(row.dataset.word || "");
-      showCopySuccess(actionButton);
-    } catch (error) {
-      console.error("Copy failed.", error);
+    if (oldestWord) {
+      generatedWords.delete(oldestWord);
     }
-    return;
-  }
 
-  if (actionButton.classList.contains("play-btn")) {
-    await playPronunciation(row, actionButton);
+    if (oldestRowId) {
+      if (selectedRowId === oldestRowId) {
+        selectedRowId = null;
+      }
+
+      if (playingRowId === oldestRowId) {
+        stopAudio();
+      }
+
+      clearCopyFeedback(oldestRowId);
+      rowStateById.delete(oldestRowId);
+    }
+
+    oldest.remove();
   }
 }
 
@@ -712,32 +1232,74 @@ function addResult() {
     return;
   }
 
-  const item = createResultRow(generated, pollyService.enabled);
-  resultsList.prepend(item);
+  const state = createRowState(generated);
+  rowStateById.set(state.rowId, state);
+
+  const row = createResultRow(state);
+  resultsList.prepend(row);
   generatedWords.add(generated.word);
+  renderRow(state.rowId);
 
-  while (resultsList.children.length > MAX_RESULTS) {
-    const oldest = resultsList.lastElementChild;
-    if (!oldest) {
-      break;
+  removeOldestRowsIfNeeded();
+}
+
+async function handleResultListClick(event) {
+  const row = event.target.closest(".result-row");
+  if (!row || !resultsList.contains(row)) {
+    return;
+  }
+
+  const rowId = row.dataset.rowId;
+  if (!rowId || !rowStateById.has(rowId)) {
+    return;
+  }
+
+  const actionButton = event.target.closest("[data-action]");
+  if (actionButton) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  setSelectedRow(rowId);
+
+  if (!actionButton) {
+    return;
+  }
+
+  const action = actionButton.dataset.action;
+
+  if (action === "toggle-heart") {
+    await handleToggleHeart(rowId);
+    return;
+  }
+
+  if (action === "copy-word") {
+    try {
+      await copyTextToClipboard(row.dataset.word || "");
+      showCopySuccess(rowId);
+    } catch (error) {
+      console.error("Copy failed.", error);
     }
+    return;
+  }
 
-    const oldestWord = oldest.dataset.word;
-    if (oldestWord) {
-      generatedWords.delete(oldestWord);
-    }
+  if (action === "play-pronunciation") {
+    await playPronunciation(rowId);
+    return;
+  }
 
-    if (selectedRow === oldest) {
-      clearSelection();
-    }
+  if (action === "open-meaning-editor") {
+    openMeaningEditor(rowId);
+    return;
+  }
 
-    if (activePlayButton && oldest.contains(activePlayButton)) {
-      sharedAudio.pause();
-      sharedAudio.currentTime = 0;
-      clearPlayState(activePlayButton);
-    }
+  if (action === "save-meaning") {
+    await handleSaveMeaning(rowId);
+    return;
+  }
 
-    oldest.remove();
+  if (action === "cancel-meaning") {
+    closeMeaningEditor(rowId);
   }
 }
 
@@ -748,8 +1310,11 @@ resultsList.addEventListener("click", (event) => {
   void handleResultListClick(event);
 });
 
+resultsList.addEventListener("input", handleMeaningInput);
+resultsList.addEventListener("keydown", handleMeaningInputKeydown);
+
 document.addEventListener("click", (event) => {
-  if (resultsList.contains(event.target)) {
+  if (event.target.closest(".result-row")) {
     return;
   }
 
