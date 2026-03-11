@@ -121,12 +121,95 @@ h2 {
 
 .results-list {
   margin: 0;
-  padding-left: 1.25rem;
+  padding: 0;
+  list-style: none;
 }
 
-.results-list li {
-  margin-bottom: 0.6rem;
+.result-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 2.6rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 10px;
   line-height: 1.35;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.result-row + .result-row {
+  margin-top: 0.45rem;
+}
+
+.result-row:hover,
+.result-row.is-selected {
+  background: rgba(0, 153, 255, 0.14);
+  border-color: rgba(0, 153, 255, 0.52);
+}
+
+.row-actions {
+  width: 4.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.action-btn {
+  width: 1.95rem;
+  height: 1.95rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0f1620;
+  color: var(--text-main);
+  font-size: 0.98rem;
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-4px);
+  transition: opacity 0.16s ease, transform 0.16s ease, border-color 0.16s ease, color 0.16s ease, background-color 0.16s ease;
+}
+
+.result-row:hover .action-btn,
+.result-row.is-selected .action-btn,
+.result-row:focus-within .action-btn {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.action-btn:hover,
+.action-btn:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.action-btn.is-loading {
+  cursor: wait;
+  color: var(--text-muted);
+}
+
+.action-btn.is-playing {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+  background: rgba(0, 153, 255, 0.13);
+}
+
+.action-btn.is-success {
+  border-color: #2ba36f;
+  color: #72f0b4;
+}
+
+.action-btn.is-hidden {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.row-content {
+  min-width: 0;
 }
 
 .word {
@@ -157,5 +240,14 @@ h2 {
 
   .ipa-link {
     align-self: flex-start;
+  }
+
+  .result-row {
+    min-height: 2.8rem;
+  }
+
+  .action-btn {
+    width: 2.05rem;
+    height: 2.05rem;
   }
 }
