@@ -34,6 +34,9 @@ const DEFAULT_ENGINE = "neural";
 const DEFAULT_OUTPUT_FORMAT = "mp3";
 const DEFAULT_HEARTS_WORD_TIMESTAMP_INDEX = "word-timestamp-index";
 const COPY_FEEDBACK_MS = 1200;
+const LOCAL_STORAGE_ROWS_KEY = "xo.generated-rows.v1";
+const LOCAL_STORAGE_ROWS_VERSION = 1;
+const PERSIST_SAVE_DEBOUNCE_MS = 250;
 
 const SLOT_TYPES = {
   CONSONANT: "C",
@@ -60,6 +63,7 @@ const sharedAudio = new Audio();
 let selectedRowId = null;
 let playingRowId = null;
 let awsInitPromise = null;
+let persistRowsTimer = null;
 
 function randomFrom(list) {
   return list[Math.floor(Math.random() * list.length)];
@@ -866,6 +870,245 @@ function createRowState(generated) {
   };
 }
 
+function clearPersistRowsTimer() {
+  if (!persistRowsTimer) {
+    return;
+  }
+
+  window.clearTimeout(persistRowsTimer);
+  persistRowsTimer = null;
+}
+
+function getLocalStorageHandle() {
+  try {
+    return window.localStorage;
+  } catch (error) {
+    return null;
+  }
+}
+
+function serializeRowState(state) {
+  const timestamp = Number(state.timestamp);
+  const normalizedTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now();
+  const updatedTimestamp = Number(state.updatedTimestamp);
+  const normalizedUpdatedTimestamp = Number.isFinite(updatedTimestamp)
+    ? updatedTimestamp
+    : normalizedTimestamp;
+  const importedTimestamp = Number(state.importedSourceTimestamp);
+  const unheartedTimestamp = Number(state.unheartedTimestamp);
+  const meaning = trimOrEmpty(state.meaning);
+  const draftMeaning = typeof state.draftMeaning === "string" ? state.draftMeaning : "";
+
+  return {
+    rowId: state.rowId,
+    timestamp: normalizedTimestamp,
+    updatedTimestamp: normalizedUpdatedTimestamp,
+    unheartedTimestamp:
+      state.unheartedTimestamp === null || typeof state.unheartedTimestamp === "undefined"
+        ? null
+        : Number.isFinite(unheartedTimestamp)
+          ? unheartedTimestamp
+          : null,
+    user: trimOrEmpty(state.user),
+    word: state.word,
+    ipa: state.ipa,
+    hearted: Boolean(state.hearted),
+    meaning: meaning || null,
+    draftMeaning,
+    hasDraftCache: Boolean(state.hasDraftCache),
+    hasPersistedRecord: Boolean(state.hasPersistedRecord),
+    hasImportedMeaning: Boolean(state.hasImportedMeaning),
+    importedSourceRowId: trimOrEmpty(state.importedSourceRowId),
+    importedSourceTimestamp: Number.isFinite(importedTimestamp) ? importedTimestamp : null
+  };
+}
+
+function deserializeRowState(rawState) {
+  if (!rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
+    return null;
+  }
+
+  const rowId = trimOrEmpty(rawState.rowId);
+  const word = trimOrEmpty(rawState.word);
+  const ipa = trimOrEmpty(rawState.ipa);
+  if (!rowId || !word || !ipa) {
+    return null;
+  }
+
+  const rawTimestamp = Number(rawState.timestamp);
+  const timestamp = Number.isFinite(rawTimestamp) ? rawTimestamp : Date.now();
+
+  const rawUpdatedTimestamp = Number(rawState.updatedTimestamp);
+  const updatedTimestamp = Number.isFinite(rawUpdatedTimestamp) ? rawUpdatedTimestamp : timestamp;
+
+  const rawUnheartedTimestamp = Number(rawState.unheartedTimestamp);
+  const unheartedTimestamp =
+    rawState.unheartedTimestamp === null || typeof rawState.unheartedTimestamp === "undefined"
+      ? null
+      : Number.isFinite(rawUnheartedTimestamp)
+        ? rawUnheartedTimestamp
+        : null;
+
+  const meaning = hasMeaningText(rawState.meaning) ? trimOrEmpty(rawState.meaning) : null;
+  const draftMeaning = typeof rawState.draftMeaning === "string" ? rawState.draftMeaning : "";
+  const hasImportedMeaning = Boolean(rawState.hasImportedMeaning) && Boolean(meaning);
+
+  const rawImportedSourceTimestamp = Number(rawState.importedSourceTimestamp);
+  const importedSourceTimestamp = Number.isFinite(rawImportedSourceTimestamp)
+    ? rawImportedSourceTimestamp
+    : null;
+
+  return {
+    rowId,
+    timestamp,
+    updatedTimestamp,
+    unheartedTimestamp,
+    user: trimOrEmpty(rawState.user),
+    word,
+    ipa,
+    hearted: Boolean(rawState.hearted),
+    meaning,
+    draftMeaning,
+    hasDraftCache: Boolean(rawState.hasDraftCache) || draftMeaning.length > 0,
+    isEditing: false,
+    saveStatus: "idle",
+    copyFlash: false,
+    hasPersistedRecord: Boolean(rawState.hasPersistedRecord),
+    hasImportedMeaning,
+    importedSourceRowId: trimOrEmpty(rawState.importedSourceRowId),
+    importedSourceTimestamp: hasImportedMeaning ? importedSourceTimestamp : null
+  };
+}
+
+function getPersistedRowStatesInDisplayOrder() {
+  const rows = [];
+  const rowElements = resultsList.querySelectorAll(".result-row");
+
+  for (const rowElement of rowElements) {
+    const rowId = rowElement.dataset.rowId;
+    if (!rowId) {
+      continue;
+    }
+
+    const state = rowStateById.get(rowId);
+    if (!state) {
+      continue;
+    }
+
+    rows.push(serializeRowState(state));
+
+    if (rows.length >= MAX_RESULTS) {
+      break;
+    }
+  }
+
+  return rows;
+}
+
+function savePersistedRows() {
+  const storage = getLocalStorageHandle();
+  if (!storage) {
+    return;
+  }
+
+  const payload = {
+    version: LOCAL_STORAGE_ROWS_VERSION,
+    rows: getPersistedRowStatesInDisplayOrder()
+  };
+
+  try {
+    storage.setItem(LOCAL_STORAGE_ROWS_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.error("Failed to save generated rows to local storage.", error);
+  }
+}
+
+function flushPersistedRowsSave() {
+  clearPersistRowsTimer();
+  savePersistedRows();
+}
+
+function schedulePersistedRowsSave() {
+  clearPersistRowsTimer();
+  persistRowsTimer = window.setTimeout(() => {
+    persistRowsTimer = null;
+    savePersistedRows();
+  }, PERSIST_SAVE_DEBOUNCE_MS);
+}
+
+function loadPersistedRows() {
+  const storage = getLocalStorageHandle();
+  if (!storage) {
+    return [];
+  }
+
+  try {
+    const rawValue = storage.getItem(LOCAL_STORAGE_ROWS_KEY);
+    if (!rawValue) {
+      return [];
+    }
+
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return [];
+    }
+
+    if (parsed.version !== LOCAL_STORAGE_ROWS_VERSION || !Array.isArray(parsed.rows)) {
+      return [];
+    }
+
+    const rows = [];
+    for (const rawState of parsed.rows) {
+      const state = deserializeRowState(rawState);
+      if (!state) {
+        continue;
+      }
+
+      rows.push(state);
+      if (rows.length >= MAX_RESULTS) {
+        break;
+      }
+    }
+
+    return rows;
+  } catch (error) {
+    console.error("Failed to load generated rows from local storage.", error);
+
+    try {
+      storage.removeItem(LOCAL_STORAGE_ROWS_KEY);
+    } catch (removeError) {
+      console.error("Failed to clear invalid generated rows local storage data.", removeError);
+    }
+
+    return [];
+  }
+}
+
+function restorePersistedRows() {
+  const persistedRows = loadPersistedRows();
+  if (persistedRows.length === 0) {
+    return;
+  }
+
+  let skippedRows = 0;
+  for (const state of persistedRows) {
+    if (rowStateById.has(state.rowId) || generatedWords.has(state.word)) {
+      skippedRows += 1;
+      continue;
+    }
+
+    const row = createResultRow(state);
+    rowStateById.set(state.rowId, state);
+    generatedWords.add(state.word);
+    resultsList.append(row);
+    renderRow(state.rowId);
+  }
+
+  if (skippedRows > 0) {
+    savePersistedRows();
+  }
+}
+
 function createResultRow(state) {
   const item = document.createElement("li");
   item.className = "result-row";
@@ -953,6 +1196,7 @@ async function hydrateImportedDefinition(rowId) {
       typeof lookup.match.timestamp !== "undefined" ? lookup.match.timestamp : null;
     currentState.hasDraftCache = false;
     renderRow(rowId);
+    flushPersistedRowsSave();
   } catch (error) {
     console.error("Failed to load imported definition.", error);
   }
@@ -1205,6 +1449,7 @@ async function handleToggleHeart(rowId) {
   } finally {
     state.saveStatus = "idle";
     renderRow(rowId);
+    flushPersistedRowsSave();
   }
 }
 
@@ -1290,6 +1535,7 @@ async function handleSaveMeaning(rowId) {
   } finally {
     state.saveStatus = "idle";
     renderRow(rowId);
+    flushPersistedRowsSave();
   }
 }
 
@@ -1311,6 +1557,7 @@ function handleMeaningInput(event) {
 
   state.draftMeaning = input.value;
   state.hasDraftCache = true;
+  schedulePersistedRowsSave();
 }
 
 function handleMeaningInputKeydown(event) {
@@ -1440,6 +1687,8 @@ function generateUniqueWord(min, max) {
 }
 
 function removeOldestRowsIfNeeded() {
+  let removedAnyRows = false;
+
   while (resultsList.children.length > MAX_RESULTS) {
     const oldest = resultsList.lastElementChild;
     if (!oldest) {
@@ -1467,7 +1716,10 @@ function removeOldestRowsIfNeeded() {
     }
 
     oldest.remove();
+    removedAnyRows = true;
   }
+
+  return removedAnyRows;
 }
 
 function addResult() {
@@ -1488,6 +1740,7 @@ function addResult() {
   void hydrateImportedDefinition(state.rowId);
 
   removeOldestRowsIfNeeded();
+  flushPersistedRowsSave();
 }
 
 async function handleResultListClick(event) {
@@ -1561,6 +1814,8 @@ async function handleResultListClick(event) {
 sharedAudio.addEventListener("ended", () => clearPlayState());
 sharedAudio.addEventListener("error", () => clearPlayState());
 
+restorePersistedRows();
+
 resultsList.addEventListener("click", (event) => {
   void handleResultListClick(event);
 });
@@ -1574,6 +1829,10 @@ document.addEventListener("click", (event) => {
   }
 
   clearSelection();
+});
+
+window.addEventListener("beforeunload", () => {
+  flushPersistedRowsSave();
 });
 
 minInput.addEventListener("change", clampSyllables);

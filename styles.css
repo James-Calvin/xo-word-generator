@@ -44,6 +44,10 @@ h2 {
   color: var(--text-main);
 }
 
+.results-section h2 {
+  text-align: left;
+}
+
 .controls {
   display: flex;
   justify-content: space-between;
