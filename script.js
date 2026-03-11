@@ -20,11 +20,11 @@ const consonants = [
   { symbol: "d", ipa: "d" },
   { symbol: "s", ipa: "s" },
   { symbol: "n", ipa: "n" },
-  { symbol: "ch", ipa: "tʃ" },
+  { symbol: "ch", ipa: "t͡ʃ" },
   { symbol: "x", ipa: "ʃ" },
   { symbol: "ñ", ipa: "ɲ" },
   { symbol: "y", ipa: "j" },
-  { symbol: "t", ipa: "t͡s" }
+  { symbol: "t", ipa: "t͡s" },
 ];
 
 const MAX_RESULTS = 50;
