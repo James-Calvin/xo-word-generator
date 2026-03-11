@@ -12,7 +12,7 @@ const vowels = [
 const consonants = [
   { symbol: "g", ipa: "g" },
   { symbol: "b", ipa: "b" },
-  { symbol: "r", ipa: "ɾ" },
+  { symbol: "r", ipa: "r" },
   { symbol: "l", ipa: "l" },
   { symbol: "j", ipa: "d͡ʒ" },
   { symbol: "m", ipa: "m" },
@@ -548,7 +548,6 @@ function addWordEndBan(symbol) {
 
 addWordEndBan("y");
 addWordEndBan("ñ");
-addSyllableRule("o", ["r"]);
 
 function buildWord(min, max) {
   const syllableCount = Math.floor(Math.random() * (max - min + 1)) + min;
