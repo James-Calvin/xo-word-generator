@@ -52,6 +52,7 @@ const RELATIONS = {
 const minInput = document.getElementById("minSyllables");
 const maxInput = document.getElementById("maxSyllables");
 const generateBtn = document.getElementById("generateBtn");
+const clearAllBtn = document.getElementById("clearAllBtn");
 const resultsList = document.getElementById("results");
 
 const generatedWords = new Set();
@@ -879,6 +880,19 @@ function clearPersistRowsTimer() {
   persistRowsTimer = null;
 }
 
+function removePersistedRowsStorage() {
+  const storage = getLocalStorageHandle();
+  if (!storage) {
+    return;
+  }
+
+  try {
+    storage.removeItem(LOCAL_STORAGE_ROWS_KEY);
+  } catch (error) {
+    console.error("Failed to clear generated rows local storage data.", error);
+  }
+}
+
 function getLocalStorageHandle() {
   try {
     return window.localStorage;
@@ -1006,6 +1020,12 @@ function getPersistedRowStatesInDisplayOrder() {
 }
 
 function savePersistedRows() {
+  const rows = getPersistedRowStatesInDisplayOrder();
+  if (rows.length === 0) {
+    removePersistedRowsStorage();
+    return;
+  }
+
   const storage = getLocalStorageHandle();
   if (!storage) {
     return;
@@ -1013,7 +1033,7 @@ function savePersistedRows() {
 
   const payload = {
     version: LOCAL_STORAGE_ROWS_VERSION,
-    rows: getPersistedRowStatesInDisplayOrder()
+    rows
   };
 
   try {
@@ -1107,6 +1127,32 @@ function restorePersistedRows() {
   if (skippedRows > 0) {
     savePersistedRows();
   }
+}
+
+function clearAllResults() {
+  clearPersistRowsTimer();
+
+  const rowIds = Array.from(copyFeedbackTimers.keys());
+  for (const rowId of rowIds) {
+    clearCopyFeedback(rowId);
+  }
+
+  clearSelection();
+  stopAudio();
+
+  rowStateById.clear();
+  generatedWords.clear();
+  audioCache.clear();
+  resultsList.textContent = "";
+
+  selectedRowId = null;
+  playingRowId = null;
+
+  removePersistedRowsStorage();
+}
+
+function handleClearAllClick() {
+  clearAllResults();
 }
 
 function createResultRow(state) {
@@ -1838,3 +1884,6 @@ window.addEventListener("beforeunload", () => {
 minInput.addEventListener("change", clampSyllables);
 maxInput.addEventListener("change", clampSyllables);
 generateBtn.addEventListener("click", addResult);
+if (clearAllBtn) {
+  clearAllBtn.addEventListener("click", handleClearAllClick);
+}
