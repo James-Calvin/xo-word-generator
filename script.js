@@ -32,6 +32,7 @@ const RETRY_LIMIT = 100;
 const DEFAULT_VOICE_ID = "Joanna";
 const DEFAULT_ENGINE = "neural";
 const DEFAULT_OUTPUT_FORMAT = "mp3";
+const DEFAULT_HEARTS_WORD_TIMESTAMP_INDEX = "word-timestamp-index";
 const COPY_FEEDBACK_MS = 1200;
 
 const SLOT_TYPES = {
@@ -83,6 +84,10 @@ function normalizeAwsConfig(rawConfig) {
   const identityPoolId = typeof source.identityPoolId === "string" ? source.identityPoolId.trim() : "";
   const heartsTableName =
     typeof source.heartsTableName === "string" ? source.heartsTableName.trim() : "";
+  const heartsWordTimestampIndexName =
+    typeof source.heartsWordTimestampIndexName === "string" && source.heartsWordTimestampIndexName.trim()
+      ? source.heartsWordTimestampIndexName.trim()
+      : DEFAULT_HEARTS_WORD_TIMESTAMP_INDEX;
 
   const voiceId =
     typeof source.voiceId === "string" && source.voiceId.trim()
@@ -101,6 +106,7 @@ function normalizeAwsConfig(rawConfig) {
     region,
     identityPoolId,
     heartsTableName,
+    heartsWordTimestampIndexName,
     voiceId,
     engine,
     outputFormat
@@ -497,6 +503,155 @@ async function getIdentityId() {
   return credentials.identityId;
 }
 
+function hasMeaningText(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function toEpochMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortMatchesByTimestampDesc(items) {
+  return [...items].sort((a, b) => toEpochMs(b.timestamp) - toEpochMs(a.timestamp));
+}
+
+function findNewestNonEmptyMeaningMatch(items) {
+  const sorted = sortMatchesByTimestampDesc(items);
+  return sorted.find((item) => hasMeaningText(item.meaning)) || null;
+}
+
+function logMeaningMatchesFromFullRead(word, matches) {
+  const flattened = sortMatchesByTimestampDesc(matches).map((item) => ({
+    rowId: item.rowId,
+    timestamp: item.timestamp,
+    meaning: item.meaning ?? null
+  }));
+
+  console.log("Definition lookup used full table read for word.", {
+    word,
+    matches: flattened
+  });
+}
+
+async function queryWordMatchesByIndex(word) {
+  const currentHeartsTableClient = getHeartsTableClient();
+  if (!currentHeartsTableClient) {
+    return [];
+  }
+
+  const matches = [];
+  let lastEvaluatedKey = undefined;
+
+  do {
+    const response = await currentHeartsTableClient
+      .query({
+        TableName: awsConfig.heartsTableName,
+        IndexName: awsConfig.heartsWordTimestampIndexName,
+        KeyConditionExpression: "#word = :word",
+        ExpressionAttributeNames: {
+          "#word": "word"
+        },
+        ExpressionAttributeValues: {
+          ":word": word
+        },
+        ScanIndexForward: false,
+        ExclusiveStartKey: lastEvaluatedKey
+      })
+      .promise();
+
+    if (Array.isArray(response.Items) && response.Items.length > 0) {
+      matches.push(...response.Items);
+    }
+
+    lastEvaluatedKey = response.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return matches;
+}
+
+async function scanWordMatches(word) {
+  const currentHeartsTableClient = getHeartsTableClient();
+  if (!currentHeartsTableClient) {
+    return [];
+  }
+
+  const matches = [];
+  let lastEvaluatedKey = undefined;
+
+  do {
+    const response = await currentHeartsTableClient
+      .scan({
+        TableName: awsConfig.heartsTableName,
+        FilterExpression: "#word = :word",
+        ExpressionAttributeNames: {
+          "#word": "word",
+          "#timestamp": "timestamp"
+        },
+        ExpressionAttributeValues: {
+          ":word": word
+        },
+        ProjectionExpression: "rowId, #word, #timestamp, meaning",
+        ExclusiveStartKey: lastEvaluatedKey
+      })
+      .promise();
+
+    if (Array.isArray(response.Items) && response.Items.length > 0) {
+      matches.push(...response.Items);
+    }
+
+    lastEvaluatedKey = response.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return matches;
+}
+
+async function lookupLatestDefinitionForWord(word) {
+  if (!isHeartsConfigured) {
+    return null;
+  }
+
+  const ready = await ensureAwsCredentials();
+  if (!ready) {
+    return null;
+  }
+
+  try {
+    const indexedMatches = await queryWordMatchesByIndex(word);
+    const indexedMatch = findNewestNonEmptyMeaningMatch(indexedMatches);
+    const missingMeaningProjection =
+      indexedMatches.length > 0 &&
+      indexedMatches.some((item) => !Object.prototype.hasOwnProperty.call(item, "meaning"));
+
+    if (missingMeaningProjection) {
+      const fallbackMatches = await scanWordMatches(word);
+      logMeaningMatchesFromFullRead(word, fallbackMatches);
+      return {
+        match: findNewestNonEmptyMeaningMatch(fallbackMatches),
+        usedFullRead: true,
+        matches: fallbackMatches
+      };
+    }
+
+    return {
+      match: indexedMatch,
+      usedFullRead: false,
+      matches: indexedMatches
+    };
+  } catch (queryError) {
+    console.warn("Word definition index lookup failed; using full table read fallback.", queryError);
+    const fallbackMatches = await scanWordMatches(word);
+    logMeaningMatchesFromFullRead(word, fallbackMatches);
+
+    return {
+      match: findNewestNonEmptyMeaningMatch(fallbackMatches),
+      usedFullRead: true,
+      matches: fallbackMatches,
+      queryError
+    };
+  }
+}
+
 async function synthesize(word, ipa) {
   const currentPollyClient = getPollyClient();
   if (!isPlaybackConfigured || !currentPollyClient) {
@@ -552,6 +707,7 @@ async function createHeartRecord(state) {
   }
 
   const now = Date.now();
+  state.timestamp = now;
   state.user = state.user || (await getIdentityId());
   state.updatedTimestamp = now;
   state.unheartedTimestamp = null;
@@ -703,7 +859,10 @@ function createRowState(generated) {
     isEditing: false,
     saveStatus: "idle",
     copyFlash: false,
-    hasPersistedRecord: false
+    hasPersistedRecord: false,
+    hasImportedMeaning: false,
+    importedSourceRowId: "",
+    importedSourceTimestamp: null
   };
 }
 
@@ -722,14 +881,14 @@ function createResultRow(state) {
     heartButton.classList.add("is-hidden");
   }
 
-  const copyButton = createActionButton("copy-btn", "⧉", "Copy symbols", "copy-word");
+  const copyButton = createActionButton("copy-btn", "⧉", "Copy word details", "copy-word");
 
   const playButton = createActionButton("play-btn", "▶", "Play pronunciation", "play-pronunciation");
   if (!isPlaybackConfigured) {
     playButton.classList.add("is-hidden");
   }
 
-  actions.append(heartButton, copyButton, playButton);
+  actions.append(playButton, heartButton);
 
   const content = document.createElement("div");
   content.className = "row-content";
@@ -747,8 +906,56 @@ function createResultRow(state) {
   const meaning = document.createElement("div");
   meaning.className = "row-meaning";
 
-  item.append(actions, content, meaning);
+  const copySlot = document.createElement("div");
+  copySlot.className = "row-copy";
+  copySlot.append(copyButton);
+
+  item.append(actions, content, meaning, copySlot);
   return item;
+}
+
+async function hydrateImportedDefinition(rowId) {
+  if (!isHeartsConfigured) {
+    return;
+  }
+
+  const initialState = rowStateById.get(rowId);
+  if (!initialState) {
+    return;
+  }
+
+  try {
+    const lookup = await lookupLatestDefinitionForWord(initialState.word);
+    if (!lookup || !lookup.match || !hasMeaningText(lookup.match.meaning)) {
+      return;
+    }
+
+    const currentState = rowStateById.get(rowId);
+    if (!currentState) {
+      return;
+    }
+
+    if (
+      currentState.hasPersistedRecord ||
+      currentState.hearted ||
+      currentState.isEditing ||
+      currentState.saveStatus !== "idle" ||
+      hasMeaningText(currentState.meaning)
+    ) {
+      return;
+    }
+
+    currentState.meaning = trimOrEmpty(lookup.match.meaning);
+    currentState.hasImportedMeaning = true;
+    currentState.importedSourceRowId =
+      typeof lookup.match.rowId === "string" ? lookup.match.rowId : "";
+    currentState.importedSourceTimestamp =
+      typeof lookup.match.timestamp !== "undefined" ? lookup.match.timestamp : null;
+    currentState.hasDraftCache = false;
+    renderRow(rowId);
+  } catch (error) {
+    console.error("Failed to load imported definition.", error);
+  }
 }
 
 function renderMeaning(row, state) {
@@ -768,7 +975,8 @@ function renderMeaning(row, state) {
     container.appendChild(definition);
   }
 
-  if (!isHeartsConfigured || !state.hearted) {
+  const canEditMeaning = isHeartsConfigured && (state.hearted || state.hasImportedMeaning);
+  if (!canEditMeaning) {
     return;
   }
 
@@ -831,7 +1039,7 @@ function renderRow(rowId) {
   const heartButton = row.querySelector(".heart-btn");
   if (heartButton) {
     heartButton.classList.toggle("is-hearted", state.hearted);
-    heartButton.textContent = state.hearted ? "♥" : "♡";
+    heartButton.textContent = state.hearted ? "❤" : "♡";
     heartButton.setAttribute("aria-label", state.hearted ? "Remove saved word" : "Save word");
     heartButton.disabled = state.saveStatus !== "idle";
   }
@@ -852,6 +1060,16 @@ function renderRow(rowId) {
 
   renderMeaning(row, state);
 }
+function buildCopyPayload(state) {
+  if (!state) {
+    return "";
+  }
+
+  const base = `${state.word} /${state.ipa}/`;
+  const meaning = trimOrEmpty(state.meaning);
+  return meaning ? `${base} : ${meaning}` : base;
+}
+
 
 function clearCopyFeedback(rowId) {
   const timer = copyFeedbackTimers.get(rowId);
@@ -967,6 +1185,7 @@ async function handleToggleHeart(rowId) {
   } else {
     state.hearted = true;
   }
+  const turnedOn = !previousHearted && state.hearted;
 
   state.isEditing = false;
   state.saveStatus = "saving-heart";
@@ -974,6 +1193,11 @@ async function handleToggleHeart(rowId) {
 
   try {
     await persistHeartedState(state, state.hearted);
+    if (turnedOn && state.hasImportedMeaning) {
+      state.hasImportedMeaning = false;
+      state.importedSourceRowId = "";
+      state.importedSourceTimestamp = null;
+    }
   } catch (error) {
     state.hearted = previousHearted;
     state.isEditing = previousEditing;
@@ -986,7 +1210,7 @@ async function handleToggleHeart(rowId) {
 
 function openMeaningEditor(rowId) {
   const state = rowStateById.get(rowId);
-  if (!state || !state.hearted || !isHeartsConfigured) {
+  if (!state || !isHeartsConfigured || (!state.hearted && !state.hasImportedMeaning)) {
     return;
   }
 
@@ -1011,7 +1235,7 @@ function closeMeaningEditor(rowId) {
 
 async function handleSaveMeaning(rowId) {
   const state = rowStateById.get(rowId);
-  if (!state || !state.hearted || !isHeartsConfigured) {
+  if (!state || !isHeartsConfigured || (!state.hearted && !state.hasImportedMeaning)) {
     return;
   }
 
@@ -1023,23 +1247,45 @@ async function handleSaveMeaning(rowId) {
 
   const previousMeaning = state.meaning;
   const previousEditing = state.isEditing;
+  const previousHearted = state.hearted;
+  const previousImportedMeaning = state.hasImportedMeaning;
+  const previousImportedSourceRowId = state.importedSourceRowId;
+  const previousImportedSourceTimestamp = state.importedSourceTimestamp;
 
+  const importedMeaningSave = state.hasImportedMeaning && !state.hasPersistedRecord;
   state.meaning = trimmedMeaning;
   state.draftMeaning = trimmedMeaning;
   state.hasDraftCache = true;
   state.isEditing = false;
+  if (importedMeaningSave) {
+    state.hearted = true;
+  }
   state.saveStatus = "saving-meaning";
   renderRow(rowId);
 
   try {
+    let createdNewRecord = false;
     if (!state.hasPersistedRecord) {
       await persistHeartedState(state, true);
+      createdNewRecord = true;
     }
 
-    await updateMeaningRecord(state, trimmedMeaning);
+    if (!createdNewRecord) {
+      await updateMeaningRecord(state, trimmedMeaning);
+    }
+
+    if (importedMeaningSave) {
+      state.hasImportedMeaning = false;
+      state.importedSourceRowId = "";
+      state.importedSourceTimestamp = null;
+    }
   } catch (error) {
     state.meaning = previousMeaning;
     state.isEditing = previousEditing;
+    state.hearted = previousHearted;
+    state.hasImportedMeaning = previousImportedMeaning;
+    state.importedSourceRowId = previousImportedSourceRowId;
+    state.importedSourceTimestamp = previousImportedSourceTimestamp;
     console.error("Failed to save meaning.", error);
   } finally {
     state.saveStatus = "idle";
@@ -1239,6 +1485,7 @@ function addResult() {
   resultsList.prepend(row);
   generatedWords.add(generated.word);
   renderRow(state.rowId);
+  void hydrateImportedDefinition(state.rowId);
 
   removeOldestRowsIfNeeded();
 }
@@ -1275,7 +1522,15 @@ async function handleResultListClick(event) {
 
   if (action === "copy-word") {
     try {
-      await copyTextToClipboard(row.dataset.word || "");
+      const state = rowStateById.get(rowId);
+      const fallbackWord = row.dataset.word || "";
+      const fallbackIpa = row.dataset.ipa || "";
+      const text = state
+        ? buildCopyPayload(state)
+        : fallbackWord && fallbackIpa
+          ? `${fallbackWord} /${fallbackIpa}/`
+          : fallbackWord;
+      await copyTextToClipboard(text);
       showCopySuccess(rowId);
     } catch (error) {
       console.error("Copy failed.", error);
