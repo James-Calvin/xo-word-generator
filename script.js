@@ -24,7 +24,7 @@ const consonants = [
   { symbol: "x", ipa: "ʃ" },
   { symbol: "ñ", ipa: "ɲ" },
   { symbol: "y", ipa: "j" },
-  { symbol: "t", ipa: "t͡s" }
+  { symbol: "t", ipa: "t" }
 ];
 
 const MAX_RESULTS = 50;
