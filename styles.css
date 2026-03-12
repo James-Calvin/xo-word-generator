@@ -438,6 +438,129 @@ h2 {
   pointer-events: none;
 }
 
+.page-nav {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.85rem;
+}
+
+.page-nav-link {
+  color: var(--accent);
+  font-size: 0.94rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.page-nav-link:hover,
+.page-nav-link:focus-visible {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.page-nav-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.dictionary-section {
+  margin-top: 0.35rem;
+}
+
+.dictionary-status {
+  margin: 0 0 1rem;
+  color: var(--text-muted);
+  font-size: 0.94rem;
+}
+
+.dictionary-status.is-hidden {
+  display: none;
+}
+
+.dictionary-status.is-error {
+  color: #ff9aa4;
+}
+
+.dictionary-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dictionary-card {
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(7, 11, 16, 0.34);
+}
+
+.dictionary-card + .dictionary-card {
+  margin-top: 0.65rem;
+}
+
+.dictionary-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.dictionary-word-title {
+  color: var(--text-main);
+  font-size: 1.04rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.dictionary-history-toggle {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.88rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.dictionary-history-toggle:hover,
+.dictionary-history-toggle:focus-visible {
+  color: var(--accent-hover);
+}
+
+.dictionary-history-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.dictionary-entry {
+  margin-top: 0;
+}
+
+.dictionary-history {
+  margin-top: 0.4rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed rgba(169, 191, 214, 0.3);
+}
+
+.dictionary-history[hidden] {
+  display: none;
+}
+
+.dictionary-history .dictionary-entry + .dictionary-entry {
+  margin-top: 0.4rem;
+}
+
+.dictionary-sentinel {
+  height: 1px;
+}
+
+.dictionary-sentinel.is-hidden {
+  display: none;
+}
 @media (max-width: 520px) {
   .controls {
     flex-direction: column;
@@ -456,6 +579,18 @@ h2 {
 
   .ipa-link {
     align-self: flex-start;
+  }
+
+  .page-nav {
+    justify-content: flex-start;
+  }
+
+  .dictionary-card-header {
+    flex-wrap: wrap;
+  }
+
+  .dictionary-word-title {
+    flex: 1 1 100%;
   }
 
   .result-row {

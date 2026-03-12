@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>xo Dictionary</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app app-dictionary">
+    <nav class="page-nav">
+      <a class="page-nav-link" href="index.html">Back to Generator</a>
+    </nav>
+
+    <h1>xo Dictionary</h1>
+
+    <section class="dictionary-section" aria-live="polite">
+      <p id="dictionaryStatus" class="dictionary-status" role="status">Loading dictionary...</p>
+      <ol id="dictionaryList" class="dictionary-list"></ol>
+      <div id="dictionarySentinel" class="dictionary-sentinel" aria-hidden="true"></div>
+    </section>
+  </main>
+
+  <script src="aws-config.js"></script>
+  <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1692.0.min.js"></script>
+  <script src="dictionary.js"></script>
+</body>
+</html>
