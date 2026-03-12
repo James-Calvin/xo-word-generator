@@ -1,6 +1,3 @@
-const DEFAULT_VOICE_ID = "Joanna";
-const DEFAULT_ENGINE = "neural";
-const DEFAULT_OUTPUT_FORMAT = "mp3";
 const COPY_FEEDBACK_MS = 1200;
 const DICTIONARY_BATCH_SIZE = 30;
 
@@ -18,243 +15,109 @@ let selectedEntryId = null;
 let playingEntryId = null;
 let renderedGroupCount = 0;
 let observer = null;
-let awsInitPromise = null;
-let pollyClient = null;
-let heartsTableClient = null;
+const sharedApi = window.LOVE_LANGUAGE_SHARED || {};
+const sharedUtils = sharedApi.utils || {};
+const sharedUi = sharedApi.ui || {};
+const awsHelpers = window.LOVE_LANGUAGE_AWS || {};
 
-function trimOrEmpty(value) {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function hasMeaningText(value) {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function toEpochMs(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
+const trimOrEmpty =
+  typeof sharedUtils.trimOrEmpty === "function"
+    ? sharedUtils.trimOrEmpty
+    : (value) => (typeof value === "string" ? value.trim() : "");
+const hasMeaningText =
+  typeof sharedUtils.hasMeaningText === "function"
+    ? sharedUtils.hasMeaningText
+    : (value) => typeof value === "string" && value.trim().length > 0;
+const toEpochMs =
+  typeof sharedUtils.toEpochMs === "function"
+    ? sharedUtils.toEpochMs
+    : (value) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+const createRowId =
+  typeof sharedUtils.createRowId === "function"
+    ? sharedUtils.createRowId
+    : () => `row-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+const escapeXml =
+  typeof sharedUtils.escapeXml === "function"
+    ? sharedUtils.escapeXml
+    : (text) =>
+        String(text)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&apos;");
+const toAudioBlob =
+  typeof sharedUtils.toAudioBlob === "function"
+    ? sharedUtils.toAudioBlob
+    : () => null;
+const createActionButton =
+  typeof sharedUi.createActionButton === "function"
+    ? sharedUi.createActionButton
+    : (className, icon, label, action) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `action-btn ${className}`;
+        button.dataset.icon = icon;
+        button.dataset.action = action;
+        button.textContent = icon;
+        button.setAttribute("aria-label", label);
+        return button;
+      };
+const copyTextToClipboard =
+  typeof sharedUi.copyTextToClipboard === "function"
+    ? sharedUi.copyTextToClipboard
+    : async () => {};
+const buildCopyPayload =
+  typeof sharedUi.buildCopyPayload === "function"
+    ? sharedUi.buildCopyPayload
+    : ({ word, pronunciation, ipa, meaning }) => {
+        const normalizedWord = trimOrEmpty(word);
+        const normalizedPronunciation = trimOrEmpty(pronunciation) || trimOrEmpty(ipa);
+        const normalizedMeaning = trimOrEmpty(meaning);
+        const base = `${normalizedWord} /${normalizedPronunciation}/`;
+        return normalizedMeaning ? `${base} : ${normalizedMeaning}` : base;
+      };
 
 function getEntryActivityTimestamp(entry) {
   return Math.max(toEpochMs(entry.updatedTimestamp), toEpochMs(entry.timestamp));
-}
-
-function createRowId() {
-  if (window.crypto && typeof window.crypto.randomUUID === "function") {
-    return window.crypto.randomUUID();
-  }
-
-  return `row-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function buildEntryId(rowId, timestamp) {
   return `${rowId}|${timestamp}`;
 }
 
-function normalizeAwsConfig(rawConfig) {
-  const source = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+const normalizedAwsConfig =
+  typeof awsHelpers.normalizeConfig === "function"
+    ? awsHelpers.normalizeConfig(window.LOVE_LANGUAGE_AWS_CONFIG)
+    : window.LOVE_LANGUAGE_AWS_CONFIG;
+const awsRuntime =
+  typeof sharedApi.createAwsRuntime === "function"
+    ? sharedApi.createAwsRuntime({ awsConfig: normalizedAwsConfig })
+    : null;
 
-  const region = typeof source.region === "string" ? source.region.trim() : "";
-  const identityPoolId = typeof source.identityPoolId === "string" ? source.identityPoolId.trim() : "";
-  const heartsTableName =
-    typeof source.heartsTableName === "string" ? source.heartsTableName.trim() : "";
+const awsConfig = (awsRuntime && awsRuntime.awsConfig) || normalizedAwsConfig || {};
+const hasAwsSdk = Boolean(awsRuntime && awsRuntime.hasAwsSdk);
+const hasDocumentClient = Boolean(awsRuntime && awsRuntime.hasDocumentClient);
+const isPlaybackConfigured = Boolean(awsRuntime && awsRuntime.isPlaybackConfigured);
+const isDictionaryConfigured = Boolean(awsRuntime && awsRuntime.isHeartsConfigured);
 
-  const voiceId =
-    typeof source.voiceId === "string" && source.voiceId.trim() ? source.voiceId.trim() : DEFAULT_VOICE_ID;
-  const engine =
-    typeof source.engine === "string" && source.engine.trim() ? source.engine.trim() : DEFAULT_ENGINE;
-  const outputFormat =
-    typeof source.outputFormat === "string" && source.outputFormat.trim()
-      ? source.outputFormat.trim()
-      : DEFAULT_OUTPUT_FORMAT;
-
-  return {
-    region,
-    identityPoolId,
-    heartsTableName,
-    voiceId,
-    engine,
-    outputFormat
-  };
-}
-
-const awsConfig = normalizeAwsConfig(window.LOVE_LANGUAGE_AWS_CONFIG);
-const hasAwsSdk =
-  typeof window.AWS !== "undefined" &&
-  typeof window.AWS.Polly !== "undefined" &&
-  typeof window.AWS.CognitoIdentityCredentials !== "undefined";
-
-const hasDocumentClient = Boolean(
-  hasAwsSdk &&
-    typeof window.AWS.DynamoDB !== "undefined" &&
-    typeof window.AWS.DynamoDB.DocumentClient !== "undefined"
-);
-
-const isPlaybackConfigured = Boolean(hasAwsSdk && awsConfig.region && awsConfig.identityPoolId);
-const isDictionaryConfigured = Boolean(
-  hasDocumentClient && awsConfig.region && awsConfig.identityPoolId && awsConfig.heartsTableName
-);
-
-function getAudioMimeType(outputFormat) {
-  if (outputFormat === "ogg_vorbis") {
-    return "audio/ogg";
-  }
-
-  if (outputFormat === "pcm") {
-    return "audio/wav";
-  }
-
-  return "audio/mpeg";
-}
-
-function escapeXml(text) {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-function decodeBase64(base64Text) {
-  const binary = atob(base64Text);
-  const bytes = new Uint8Array(binary.length);
-
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
-  return bytes;
-}
-
-function toAudioBlob(audioStream, outputFormat) {
-  const mimeType = getAudioMimeType(outputFormat);
-
-  if (audioStream instanceof ArrayBuffer) {
-    return new Blob([audioStream], { type: mimeType });
-  }
-
-  if (ArrayBuffer.isView(audioStream)) {
-    return new Blob(
-      [new Uint8Array(audioStream.buffer, audioStream.byteOffset, audioStream.byteLength)],
-      { type: mimeType }
-    );
-  }
-
-  if (typeof audioStream === "string") {
-    return new Blob([decodeBase64(audioStream)], { type: mimeType });
-  }
-
-  return null;
-}
-
-function getPollyClient() {
-  if (!isPlaybackConfigured) {
-    return null;
-  }
-
-  if (!pollyClient) {
-    pollyClient = new window.AWS.Polly({ apiVersion: "2016-06-10", region: awsConfig.region });
-  }
-
-  return pollyClient;
-}
-
-function getHeartsTableClient() {
-  if (!isDictionaryConfigured) {
-    return null;
-  }
-
-  if (!heartsTableClient) {
-    heartsTableClient = new window.AWS.DynamoDB.DocumentClient({ region: awsConfig.region });
-  }
-
-  return heartsTableClient;
-}
-
-function refreshAwsCredentials() {
-  return new Promise((resolve, reject) => {
-    if (!window.AWS.config.credentials) {
-      reject(new Error("Missing AWS credentials configuration."));
-      return;
-    }
-
-    window.AWS.config.credentials.get((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve();
-    });
+const getPollyClient =
+  (awsRuntime && awsRuntime.getPollyClient) ||
+  (() => null);
+const getHeartsTableClient =
+  (awsRuntime && awsRuntime.getHeartsTableClient) ||
+  (() => null);
+const ensureAwsCredentials =
+  (awsRuntime && awsRuntime.ensureAwsCredentials) ||
+  (() => Promise.resolve(false));
+const getIdentityId =
+  (awsRuntime && awsRuntime.getIdentityId) ||
+  (async () => {
+    throw new Error("AWS runtime is unavailable.");
   });
-}
-
-function ensureAwsCredentials() {
-  if (!isDictionaryConfigured) {
-    return Promise.resolve(false);
-  }
-
-  if (!awsInitPromise) {
-    awsInitPromise = (async () => {
-      window.AWS.config.update({
-        region: awsConfig.region,
-        credentials: new window.AWS.CognitoIdentityCredentials({
-          IdentityPoolId: awsConfig.identityPoolId
-        })
-      });
-
-      await refreshAwsCredentials();
-      const credentials = window.AWS.config.credentials;
-
-      const currentPollyClient = getPollyClient();
-      if (currentPollyClient && credentials) {
-        currentPollyClient.config.update({
-          region: awsConfig.region,
-          credentials
-        });
-      }
-
-      const currentHeartsClient = getHeartsTableClient();
-      if (currentHeartsClient && currentHeartsClient.service && credentials) {
-        currentHeartsClient.service.config.update({
-          region: awsConfig.region,
-          credentials
-        });
-      }
-
-      return true;
-    })().catch((error) => {
-      console.error("Failed to initialize AWS credentials for dictionary page.", error);
-      awsInitPromise = null;
-      return false;
-    });
-  }
-
-  return awsInitPromise;
-}
-
-async function getIdentityId() {
-  const ready = await ensureAwsCredentials();
-  if (!ready) {
-    throw new Error("AWS guest credentials are unavailable.");
-  }
-
-  const credentials = window.AWS.config.credentials;
-  if (!credentials) {
-    throw new Error("Missing AWS credentials object.");
-  }
-
-  if (!credentials.identityId || credentials.expired) {
-    await refreshAwsCredentials();
-  }
-
-  if (!credentials.identityId) {
-    throw new Error("Could not resolve Cognito identity ID.");
-  }
-
-  return credentials.identityId;
-}
 
 function setStatus(message, type = "info") {
   if (!dictionaryStatus) {
@@ -283,17 +146,6 @@ function updateSentinelVisibility() {
 
   const hide = groups.length === 0 || renderedGroupCount >= groups.length;
   dictionarySentinel.classList.toggle("is-hidden", hide);
-}
-
-function createActionButton(className, icon, label, action) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `action-btn ${className}`;
-  button.dataset.icon = icon;
-  button.dataset.action = action;
-  button.textContent = icon;
-  button.setAttribute("aria-label", label);
-  return button;
 }
 
 function normalizeDictionaryEntry(rawItem) {
@@ -750,29 +602,6 @@ function showCopySuccess(entryId) {
   }, COPY_FEEDBACK_MS);
 
   copyFeedbackTimers.set(entryId, timer);
-}
-
-function buildCopyPayload(entry) {
-  const base = `${entry.word} /${entry.pronunciation}/`;
-  const meaning = trimOrEmpty(entry.meaning);
-  return meaning ? `${base} : ${meaning}` : base;
-}
-
-async function copyTextToClipboard(text) {
-  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const helper = document.createElement("textarea");
-  helper.value = text;
-  helper.setAttribute("readonly", "");
-  helper.style.position = "fixed";
-  helper.style.top = "-9999px";
-  document.body.appendChild(helper);
-  helper.select();
-  document.execCommand("copy");
-  document.body.removeChild(helper);
 }
 
 function setSelectedEntry(entryId) {

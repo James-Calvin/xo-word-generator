@@ -8,5 +8,38 @@ window.LOVE_LANGUAGE_AWS_CONFIG = {
   heartsWordTimestampIndexName: "word-timestamp-index",
   voiceId: "Joanna",
   engine: "neural",
-  outputFormat: "mp3",
+  outputFormat: "mp3"
 };
+
+window.LOVE_LANGUAGE_AWS = (() => {
+  const defaults = {
+    voiceId: "Joanna",
+    engine: "neural",
+    outputFormat: "mp3",
+    heartsWordTimestampIndexName: "word-timestamp-index"
+  };
+
+  function trim(value) {
+    return typeof value === "string" ? value.trim() : "";
+  }
+
+  function normalizeConfig(rawConfig) {
+    const source = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+
+    return {
+      region: trim(source.region),
+      identityPoolId: trim(source.identityPoolId),
+      heartsTableName: trim(source.heartsTableName),
+      heartsWordTimestampIndexName:
+        trim(source.heartsWordTimestampIndexName) || defaults.heartsWordTimestampIndexName,
+      voiceId: trim(source.voiceId) || defaults.voiceId,
+      engine: trim(source.engine) || defaults.engine,
+      outputFormat: trim(source.outputFormat) || defaults.outputFormat
+    };
+  }
+
+  return {
+    defaults,
+    normalizeConfig
+  };
+})();
