@@ -1,9 +1,32 @@
 const COPY_FEEDBACK_MS = 1200;
 const DICTIONARY_BATCH_SIZE = 30;
 
+const FILTERS = {
+  DEFINED: "defined",
+  UNDEFINED: "undefined",
+  ALL: "all"
+};
+
+const GROUP_CLASSIFICATIONS = {
+  DEFINED: "defined",
+  UNDEFINED: "undefined",
+  MIXED: "mixed"
+};
+
+const EMPTY_STATUS_BY_FILTER = {
+  [FILTERS.DEFINED]: "No defined words yet.",
+  [FILTERS.UNDEFINED]: "No undefined saved words yet.",
+  [FILTERS.ALL]: "No saved words yet."
+};
+
+const dictionaryFilters = document.getElementById("dictionaryFilters");
+const myHeartsToggle = document.getElementById("dictionaryMyHeartsToggle");
 const dictionaryList = document.getElementById("dictionaryList");
 const dictionaryStatus = document.getElementById("dictionaryStatus");
 const dictionarySentinel = document.getElementById("dictionarySentinel");
+const filterButtons = dictionaryFilters
+  ? Array.from(dictionaryFilters.querySelectorAll(".dictionary-filter-btn[data-filter]"))
+  : [];
 
 const entriesById = new Map();
 const audioCache = new Map();
@@ -11,10 +34,15 @@ const copyFeedbackTimers = new Map();
 const sharedAudio = new Audio();
 
 let groups = [];
+let visibleGroups = [];
+let activeFilter = FILTERS.DEFINED;
+let currentUserId = "";
+let showOnlyMyHearts = false;
 let selectedEntryId = null;
 let playingEntryId = null;
 let renderedGroupCount = 0;
 let observer = null;
+
 const sharedApi = window.LOVE_LANGUAGE_SHARED || {};
 const sharedUtils = sharedApi.utils || {};
 const sharedUi = sharedApi.ui || {};
@@ -81,12 +109,40 @@ const buildCopyPayload =
         return normalizedMeaning ? `${base} : ${normalizedMeaning}` : base;
       };
 
+function hasDefinedMeaning(entry) {
+  return hasMeaningText(entry && entry.meaning);
+}
+
+function matchesCurrentUserEntry(entry) {
+  return Boolean(currentUserId) && Boolean(entry) && trimOrEmpty(entry.user) === currentUserId;
+}
+
 function getEntryActivityTimestamp(entry) {
   return Math.max(toEpochMs(entry.updatedTimestamp), toEpochMs(entry.timestamp));
 }
 
 function buildEntryId(rowId, timestamp) {
   return `${rowId}|${timestamp}`;
+}
+
+function isValidFilter(filter) {
+  return filter === FILTERS.DEFINED || filter === FILTERS.UNDEFINED || filter === FILTERS.ALL;
+}
+
+function getEmptyStatusMessage(filter = activeFilter) {
+  return EMPTY_STATUS_BY_FILTER[filter] || EMPTY_STATUS_BY_FILTER[FILTERS.DEFINED];
+}
+
+function getGroupStatusLabel(classification) {
+  if (classification === GROUP_CLASSIFICATIONS.MIXED) {
+    return "Mixed";
+  }
+
+  if (classification === GROUP_CLASSIFICATIONS.UNDEFINED) {
+    return "Undefined";
+  }
+
+  return "Defined";
 }
 
 const normalizedAwsConfig =
@@ -99,8 +155,6 @@ const awsRuntime =
     : null;
 
 const awsConfig = (awsRuntime && awsRuntime.awsConfig) || normalizedAwsConfig || {};
-const hasAwsSdk = Boolean(awsRuntime && awsRuntime.hasAwsSdk);
-const hasDocumentClient = Boolean(awsRuntime && awsRuntime.hasDocumentClient);
 const isPlaybackConfigured = Boolean(awsRuntime && awsRuntime.isPlaybackConfigured);
 const isDictionaryConfigured = Boolean(awsRuntime && awsRuntime.isHeartsConfigured);
 
@@ -118,6 +172,20 @@ const getIdentityId =
   (async () => {
     throw new Error("AWS runtime is unavailable.");
   });
+
+async function ensureCurrentUserIdentity() {
+  if (currentUserId) {
+    return currentUserId;
+  }
+
+  const resolvedIdentity = trimOrEmpty(await getIdentityId());
+  if (!resolvedIdentity) {
+    throw new Error("Could not resolve the current AWS identity.");
+  }
+
+  currentUserId = resolvedIdentity;
+  return currentUserId;
+}
 
 function setStatus(message, type = "info") {
   if (!dictionaryStatus) {
@@ -139,12 +207,53 @@ function setStatus(message, type = "info") {
   }
 }
 
+function getFilterCounts() {
+  const sourceGroups = showOnlyMyHearts ? groups.filter((group) => group.hasCurrentUserHeart) : groups;
+  let definedCount = 0;
+  let undefinedCount = 0;
+
+  for (const group of sourceGroups) {
+    if (group.classification === GROUP_CLASSIFICATIONS.UNDEFINED) {
+      undefinedCount += 1;
+    } else {
+      definedCount += 1;
+    }
+  }
+
+  return {
+    [FILTERS.DEFINED]: definedCount,
+    [FILTERS.UNDEFINED]: undefinedCount,
+    [FILTERS.ALL]: sourceGroups.length
+  };
+}
+
+function updateFilterControls() {
+  const counts = getFilterCounts();
+
+  for (const button of filterButtons) {
+    const filter = button.dataset.filter;
+    const isActive = filter === activeFilter;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+
+    const count = button.querySelector(".dictionary-filter-count");
+    if (count) {
+      count.textContent = String(counts[filter] || 0);
+    }
+  }
+
+  if (myHeartsToggle) {
+    myHeartsToggle.classList.toggle("is-active", showOnlyMyHearts);
+    myHeartsToggle.setAttribute("aria-pressed", showOnlyMyHearts ? "true" : "false");
+  }
+}
+
 function updateSentinelVisibility() {
   if (!dictionarySentinel) {
     return;
   }
 
-  const hide = groups.length === 0 || renderedGroupCount >= groups.length;
+  const hide = visibleGroups.length === 0 || renderedGroupCount >= visibleGroups.length;
   dictionarySentinel.classList.toggle("is-hidden", hide);
 }
 
@@ -156,10 +265,9 @@ function normalizeDictionaryEntry(rawItem) {
   const rowId = trimOrEmpty(rawItem.rowId);
   const word = trimOrEmpty(rawItem.word);
   const pronunciation = trimOrEmpty(rawItem.pronunciation || rawItem.ipa);
-  const meaning = trimOrEmpty(rawItem.meaning);
   const hearted = Boolean(rawItem.hearted);
 
-  if (!rowId || !word || !pronunciation || !meaning || !hearted) {
+  if (!rowId || !word || !pronunciation || !hearted) {
     return null;
   }
 
@@ -176,7 +284,7 @@ function normalizeDictionaryEntry(rawItem) {
     user: trimOrEmpty(rawItem.user),
     word,
     pronunciation,
-    meaning,
+    meaning: trimOrEmpty(rawItem.meaning),
     hearted: true,
     draftMeaning: "",
     hasDraftCache: false,
@@ -200,7 +308,7 @@ function buildDictionaryTableItem(entry) {
   };
 }
 
-async function scanDefinedHeartedEntries() {
+async function scanHeartedEntries() {
   const currentHeartsClient = getHeartsTableClient();
   if (!currentHeartsClient) {
     return [];
@@ -213,7 +321,7 @@ async function scanDefinedHeartedEntries() {
     const response = await currentHeartsClient
       .scan({
         TableName: awsConfig.heartsTableName,
-        FilterExpression: "#hearted = :hearted AND attribute_exists(#meaning) AND #meaning <> :empty",
+        FilterExpression: "#hearted = :hearted",
         ExpressionAttributeNames: {
           "#rowId": "rowId",
           "#word": "word",
@@ -226,8 +334,7 @@ async function scanDefinedHeartedEntries() {
           "#unheartedTimestamp": "unheartedTimestamp"
         },
         ExpressionAttributeValues: {
-          ":hearted": true,
-          ":empty": ""
+          ":hearted": true
         },
         ProjectionExpression:
           "#rowId, #word, #pronunciation, #meaning, #hearted, #timestamp, #updatedTimestamp, #user, #unheartedTimestamp",
@@ -244,12 +351,13 @@ async function scanDefinedHeartedEntries() {
 
   return items;
 }
+
 function rebuildGroupsFromEntries() {
   const expandedByWord = new Map(groups.map((group) => [group.word, group.expanded]));
   const entriesByWord = new Map();
 
   for (const entry of entriesById.values()) {
-    if (!entry.hearted || !hasMeaningText(entry.meaning)) {
+    if (!entry.hearted) {
       continue;
     }
 
@@ -261,14 +369,48 @@ function rebuildGroupsFromEntries() {
   }
 
   const nextGroups = [];
-  for (const [word, entries] of entriesByWord.entries()) {
-    entries.sort((left, right) => getEntryActivityTimestamp(right) - getEntryActivityTimestamp(left));
+  for (const [word, wordEntries] of entriesByWord.entries()) {
+    const definedEntries = [];
+    const undefinedEntries = [];
+
+    for (const entry of wordEntries) {
+      if (hasDefinedMeaning(entry)) {
+        definedEntries.push(entry);
+      } else {
+        undefinedEntries.push(entry);
+      }
+    }
+
+    definedEntries.sort((left, right) => getEntryActivityTimestamp(right) - getEntryActivityTimestamp(left));
+    undefinedEntries.sort(
+      (left, right) => getEntryActivityTimestamp(right) - getEntryActivityTimestamp(left)
+    );
+
+    if (definedEntries.length === 0 && undefinedEntries.length === 0) {
+      continue;
+    }
+
+    const classification =
+      definedEntries.length > 0
+        ? undefinedEntries.length > 0
+          ? GROUP_CLASSIFICATIONS.MIXED
+          : GROUP_CLASSIFICATIONS.DEFINED
+        : GROUP_CLASSIFICATIONS.UNDEFINED;
+
+    const latestActivityTimestamp = wordEntries.reduce(
+      (maxTimestamp, entry) => Math.max(maxTimestamp, getEntryActivityTimestamp(entry)),
+      0
+    );
 
     nextGroups.push({
       word,
-      entries,
+      definedEntries,
+      undefinedEntries,
+      classification,
+      currentUserHeartedEntries: wordEntries.filter((entry) => matchesCurrentUserEntry(entry)),
+      hasCurrentUserHeart: wordEntries.some((entry) => matchesCurrentUserEntry(entry)),
       expanded: Boolean(expandedByWord.get(word)),
-      latestActivityTimestamp: entries.length > 0 ? getEntryActivityTimestamp(entries[0]) : 0
+      latestActivityTimestamp
     });
   }
 
@@ -282,6 +424,47 @@ function rebuildGroupsFromEntries() {
   });
 
   groups = nextGroups;
+}
+
+function getVisibleEntriesForGroup(group) {
+  if (!group) {
+    return [];
+  }
+
+  if (activeFilter === FILTERS.UNDEFINED) {
+    return group.undefinedEntries;
+  }
+
+  if (activeFilter === FILTERS.ALL) {
+    return [...group.definedEntries, ...group.undefinedEntries];
+  }
+
+  return group.definedEntries;
+}
+
+function isGroupVisible(group) {
+  if (!group) {
+    return false;
+  }
+
+  if (showOnlyMyHearts && !group.hasCurrentUserHeart) {
+    return false;
+  }
+
+  if (activeFilter === FILTERS.UNDEFINED) {
+    return group.classification === GROUP_CLASSIFICATIONS.UNDEFINED;
+  }
+
+  if (activeFilter === FILTERS.ALL) {
+    return true;
+  }
+
+  return group.classification !== GROUP_CLASSIFICATIONS.UNDEFINED;
+}
+
+function rebuildVisibleGroups() {
+  visibleGroups = groups.filter((group) => isGroupVisible(group) && getVisibleEntriesForGroup(group).length > 0);
+  updateFilterControls();
 }
 
 function getEntryRow(entryId) {
@@ -308,11 +491,14 @@ function renderEntryMeaning(row, entry) {
   container.textContent = "";
   const isSelected = selectedEntryId === entry.id;
   const isSaving = entry.saveStatus !== "idle";
+  const hasMeaning = hasDefinedMeaning(entry);
 
-  const definition = document.createElement("span");
-  definition.className = "meaning-definition";
-  definition.textContent = `— ${entry.meaning}`;
-  container.appendChild(definition);
+  if (hasMeaning) {
+    const definition = document.createElement("span");
+    definition.className = "meaning-definition";
+    definition.textContent = `— ${entry.meaning}`;
+    container.appendChild(definition);
+  }
 
   if (entry.isEditing && isSelected) {
     const editor = document.createElement("div");
@@ -356,7 +542,7 @@ function renderEntryMeaning(row, entry) {
   link.type = "button";
   link.className = "meaning-link";
   link.dataset.action = "open-meaning-editor";
-  link.textContent = "Edit";
+  link.textContent = hasMeaning ? "Edit" : "Add a meaning";
   link.disabled = isSaving;
   container.appendChild(link);
 }
@@ -366,10 +552,13 @@ function applyEntryRowState(row, entry) {
 
   const heartButton = row.querySelector(".heart-btn");
   if (heartButton) {
-    heartButton.classList.add("is-hearted");
+    const group = getGroupByWord(entry.word);
+    const showHeartButton = Boolean(group && group.hasCurrentUserHeart);
+    heartButton.classList.toggle("is-hidden", !showHeartButton);
+    heartButton.classList.toggle("is-hearted", showHeartButton);
     heartButton.textContent = "❤";
-    heartButton.setAttribute("aria-label", "Remove saved word");
-    heartButton.disabled = entry.saveStatus !== "idle";
+    heartButton.setAttribute("aria-label", "Remove my saved word");
+    heartButton.disabled = !showHeartButton || entry.saveStatus !== "idle";
   }
 
   const copyButton = row.querySelector(".copy-btn");
@@ -407,12 +596,12 @@ function createEntryRowElement(entry, isHistoryEntry) {
   }
 
   row.dataset.entryId = entry.id;
+  row.dataset.word = entry.word;
 
   const actions = document.createElement("div");
   actions.className = "row-actions";
 
   const heartButton = createActionButton("heart-btn", "❤", "Remove saved word", "toggle-heart");
-  heartButton.classList.add("is-hearted");
 
   const copyButton = createActionButton("copy-btn", "⧉", "Copy word details", "copy-word");
 
@@ -450,6 +639,11 @@ function createEntryRowElement(entry, isHistoryEntry) {
 }
 
 function createGroupCard(group) {
+  const visibleEntries = getVisibleEntriesForGroup(group);
+  if (visibleEntries.length === 0) {
+    return null;
+  }
+
   const card = document.createElement("li");
   card.className = "dictionary-card";
   card.dataset.word = group.word;
@@ -457,35 +651,43 @@ function createGroupCard(group) {
   const header = document.createElement("div");
   header.className = "dictionary-card-header";
 
+  const wordMeta = document.createElement("div");
+  wordMeta.className = "dictionary-word-meta";
+
   const title = document.createElement("span");
   title.className = "dictionary-word-title";
   title.textContent = group.word;
 
-  header.appendChild(title);
+  const badge = document.createElement("span");
+  badge.className = `dictionary-status-badge is-${group.classification}`;
+  badge.textContent = getGroupStatusLabel(group.classification);
 
-  if (group.entries.length > 1) {
+  wordMeta.append(title, badge);
+  header.appendChild(wordMeta);
+
+  if (visibleEntries.length > 1) {
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "dictionary-history-toggle";
     toggle.dataset.action = "toggle-history";
     toggle.dataset.word = group.word;
-    toggle.textContent = group.expanded ? "Hide history" : `Show history (${group.entries.length - 1})`;
+    toggle.textContent = group.expanded ? "Hide history" : `Show history (${visibleEntries.length - 1})`;
     header.appendChild(toggle);
   }
 
   const main = document.createElement("div");
   main.className = "dictionary-main";
-  main.appendChild(createEntryRowElement(group.entries[0], false));
+  main.appendChild(createEntryRowElement(visibleEntries[0], false));
 
   card.append(header, main);
 
-  if (group.entries.length > 1) {
+  if (visibleEntries.length > 1) {
     const history = document.createElement("div");
     history.className = "dictionary-history";
     history.hidden = !group.expanded;
 
-    for (let i = 1; i < group.entries.length; i += 1) {
-      history.appendChild(createEntryRowElement(group.entries[i], true));
+    for (let i = 1; i < visibleEntries.length; i += 1) {
+      history.appendChild(createEntryRowElement(visibleEntries[i], true));
     }
 
     card.appendChild(history);
@@ -499,8 +701,12 @@ function appendGroupCards(targetCount) {
     return;
   }
 
-  while (renderedGroupCount < targetCount && renderedGroupCount < groups.length) {
-    dictionaryList.appendChild(createGroupCard(groups[renderedGroupCount]));
+  while (renderedGroupCount < targetCount && renderedGroupCount < visibleGroups.length) {
+    const group = visibleGroups[renderedGroupCount];
+    const card = createGroupCard(group);
+    if (card) {
+      dictionaryList.appendChild(card);
+    }
     renderedGroupCount += 1;
   }
 
@@ -515,26 +721,26 @@ function renderDictionary(preserveCount = 0) {
   dictionaryList.textContent = "";
   renderedGroupCount = 0;
 
-  if (groups.length === 0) {
+  if (visibleGroups.length === 0) {
     updateSentinelVisibility();
     return;
   }
 
   const initialCount =
     preserveCount > 0
-      ? Math.min(groups.length, Math.max(DICTIONARY_BATCH_SIZE, preserveCount))
-      : Math.min(groups.length, DICTIONARY_BATCH_SIZE);
+      ? Math.min(visibleGroups.length, Math.max(DICTIONARY_BATCH_SIZE, preserveCount))
+      : Math.min(visibleGroups.length, DICTIONARY_BATCH_SIZE);
 
   appendGroupCards(initialCount);
 }
 
 function renderNextGroupBatch() {
-  if (renderedGroupCount >= groups.length) {
+  if (renderedGroupCount >= visibleGroups.length) {
     updateSentinelVisibility();
     return;
   }
 
-  const nextCount = Math.min(groups.length, renderedGroupCount + DICTIONARY_BATCH_SIZE);
+  const nextCount = Math.min(visibleGroups.length, renderedGroupCount + DICTIONARY_BATCH_SIZE);
   appendGroupCards(nextCount);
 }
 
@@ -548,8 +754,13 @@ function setupObserver() {
     observer = null;
   }
 
+  if (visibleGroups.length === 0) {
+    updateSentinelVisibility();
+    return;
+  }
+
   if (typeof window.IntersectionObserver !== "function") {
-    appendGroupCards(groups.length);
+    appendGroupCards(visibleGroups.length);
     return;
   }
 
@@ -604,6 +815,21 @@ function showCopySuccess(entryId) {
   copyFeedbackTimers.set(entryId, timer);
 }
 
+function isEntryVisible(entryId) {
+  if (!entryId) {
+    return false;
+  }
+
+  for (const group of visibleGroups) {
+    const visibleEntries = getVisibleEntriesForGroup(group);
+    if (visibleEntries.some((entry) => entry.id === entryId)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function setSelectedEntry(entryId) {
   if (!entryId || selectedEntryId === entryId) {
     return;
@@ -647,6 +873,53 @@ function stopAudio() {
   sharedAudio.pause();
   sharedAudio.currentTime = 0;
   clearPlayState();
+}
+
+function syncVisibleState(preferredEntryId = "") {
+  if (playingEntryId && !isEntryVisible(playingEntryId)) {
+    stopAudio();
+  }
+
+  if (preferredEntryId && isEntryVisible(preferredEntryId)) {
+    if (selectedEntryId !== preferredEntryId) {
+      setSelectedEntry(preferredEntryId);
+    }
+    return;
+  }
+
+  if (selectedEntryId && !isEntryVisible(selectedEntryId)) {
+    selectedEntryId = null;
+  }
+}
+
+function refreshDictionaryView(options = {}) {
+  const preserveCount = Number(options.preserveCount) > 0 ? Number(options.preserveCount) : 0;
+  const preferredEntryId = trimOrEmpty(options.preferredEntryId);
+
+  rebuildVisibleGroups();
+
+  if (!dictionaryList) {
+    updateSentinelVisibility();
+    return;
+  }
+
+  if (visibleGroups.length === 0) {
+    dictionaryList.textContent = "";
+    renderedGroupCount = 0;
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    updateSentinelVisibility();
+    setStatus(getEmptyStatusMessage());
+    syncVisibleState();
+    return;
+  }
+
+  setStatus("");
+  renderDictionary(preserveCount);
+  setupObserver();
+  syncVisibleState(preferredEntryId);
 }
 
 async function synthesize(word, ipa) {
@@ -775,7 +1048,8 @@ function getCardByWord(word) {
 
 function toggleHistory(word) {
   const group = getGroupByWord(word);
-  if (!group || group.entries.length <= 1) {
+  const visibleEntries = getVisibleEntriesForGroup(group);
+  if (!group || visibleEntries.length <= 1) {
     return;
   }
 
@@ -784,6 +1058,7 @@ function toggleHistory(word) {
   const card = getCardByWord(word);
   if (!card) {
     renderDictionary(renderedGroupCount);
+    syncVisibleState();
     return;
   }
 
@@ -794,7 +1069,7 @@ function toggleHistory(word) {
 
   const toggle = card.querySelector(".dictionary-history-toggle");
   if (toggle) {
-    toggle.textContent = group.expanded ? "Hide history" : `Show history (${group.entries.length - 1})`;
+    toggle.textContent = group.expanded ? "Hide history" : `Show history (${visibleEntries.length - 1})`;
   }
 }
 
@@ -837,9 +1112,10 @@ async function putDictionaryRecord(entry) {
     .promise();
 }
 
-async function createEditedEntry(sourceEntry, newMeaning) {
+async function createEditedEntry(sourceEntry, newMeaning, userOverride = "", heartedOverride = true) {
   const rowId = createRowId();
   const now = Date.now();
+  const resolvedUser = trimOrEmpty(userOverride) || sourceEntry.user || (await getIdentityId());
 
   const entry = {
     id: buildEntryId(rowId, now),
@@ -847,11 +1123,11 @@ async function createEditedEntry(sourceEntry, newMeaning) {
     timestamp: now,
     updatedTimestamp: now,
     unheartedTimestamp: null,
-    user: sourceEntry.user || (await getIdentityId()),
+    user: resolvedUser,
     word: sourceEntry.word,
     pronunciation: sourceEntry.pronunciation,
     meaning: newMeaning,
-    hearted: true,
+    hearted: Boolean(heartedOverride),
     draftMeaning: newMeaning,
     hasDraftCache: true,
     isEditing: false,
@@ -863,65 +1139,93 @@ async function createEditedEntry(sourceEntry, newMeaning) {
   return entry;
 }
 
-function removeEntryFromDictionary(entryId) {
-  clearCopyFeedback(entryId);
-
-  if (selectedEntryId === entryId) {
-    selectedEntryId = null;
-  }
-
-  if (playingEntryId === entryId) {
-    stopAudio();
-  }
-
-  entriesById.delete(entryId);
-
-  const previousCount = renderedGroupCount;
-  rebuildGroupsFromEntries();
-
-  if (groups.length === 0) {
-    if (dictionaryList) {
-      dictionaryList.textContent = "";
-    }
-
-    setStatus("No defined words yet.");
-    updateSentinelVisibility();
-    return;
-  }
-
-  setStatus("");
-  renderDictionary(previousCount);
-}
-
 async function handleToggleHeart(entryId) {
   const entry = entriesById.get(entryId);
-  if (!entry || !isDictionaryConfigured) {
+  const group = entry ? getGroupByWord(entry.word) : null;
+  const targetEntries =
+    group && Array.isArray(group.currentUserHeartedEntries)
+      ? group.currentUserHeartedEntries
+          .map((groupEntry) => entriesById.get(groupEntry.id))
+          .filter((groupEntry) => Boolean(groupEntry))
+      : [];
+  const visibleEntries = group ? getVisibleEntriesForGroup(group) : [];
+
+  if (!entry || !isDictionaryConfigured || !group || targetEntries.length === 0) {
     return;
   }
 
-  const previousUser = entry.user;
-  const previousUpdatedTimestamp = entry.updatedTimestamp;
-  const previousUnheartedTimestamp = entry.unheartedTimestamp;
-  entry.saveStatus = "saving-heart";
-  renderEntryRow(entryId);
+  const previousSnapshots = targetEntries.map((targetEntry) => ({
+    id: targetEntry.id,
+    user: targetEntry.user,
+    hearted: targetEntry.hearted,
+    updatedTimestamp: targetEntry.updatedTimestamp,
+    unheartedTimestamp: targetEntry.unheartedTimestamp,
+    saveStatus: targetEntry.saveStatus
+  }));
+  const previousVisibleStatuses = visibleEntries.map((visibleEntry) => ({
+    id: visibleEntry.id,
+    saveStatus: visibleEntry.saveStatus
+  }));
+
+  for (const visibleEntry of visibleEntries) {
+    visibleEntry.saveStatus = "saving-heart";
+    renderEntryRow(visibleEntry.id);
+  }
 
   try {
+    const identityId = await ensureCurrentUserIdentity();
     const now = Date.now();
-    entry.user = entry.user || (await getIdentityId());
-    entry.hearted = false;
-    entry.updatedTimestamp = now;
-    entry.unheartedTimestamp = now;
 
-    await putDictionaryRecord(entry);
-    removeEntryFromDictionary(entryId);
+    for (const targetEntry of targetEntries) {
+      targetEntry.user = targetEntry.user || identityId;
+      targetEntry.hearted = false;
+      targetEntry.updatedTimestamp = now;
+      targetEntry.unheartedTimestamp = now;
+      await putDictionaryRecord(targetEntry);
+    }
+
+    for (const targetEntry of targetEntries) {
+      clearCopyFeedback(targetEntry.id);
+      entriesById.delete(targetEntry.id);
+    }
+
+    for (const visibleEntry of visibleEntries) {
+      const currentEntry = entriesById.get(visibleEntry.id);
+      if (!currentEntry) {
+        continue;
+      }
+
+      currentEntry.saveStatus = "idle";
+    }
+
+    const previousCount = renderedGroupCount;
+    rebuildGroupsFromEntries();
+    refreshDictionaryView({ preserveCount: previousCount });
   } catch (error) {
-    entry.user = previousUser;
-    entry.hearted = true;
-    entry.updatedTimestamp = previousUpdatedTimestamp;
-    entry.unheartedTimestamp = previousUnheartedTimestamp;
-    entry.saveStatus = "idle";
-    renderEntryRow(entryId);
-    console.error("Failed to soft-delete dictionary entry.", error);
+    for (const snapshot of previousSnapshots) {
+      const targetEntry = entriesById.get(snapshot.id);
+      if (!targetEntry) {
+        continue;
+      }
+
+      targetEntry.user = snapshot.user;
+      targetEntry.hearted = snapshot.hearted;
+      targetEntry.updatedTimestamp = snapshot.updatedTimestamp;
+      targetEntry.unheartedTimestamp = snapshot.unheartedTimestamp;
+      targetEntry.saveStatus = snapshot.saveStatus;
+    }
+
+    for (const snapshot of previousVisibleStatuses) {
+      const visibleEntry = entriesById.get(snapshot.id);
+      if (!visibleEntry) {
+        continue;
+      }
+
+      visibleEntry.saveStatus = snapshot.saveStatus;
+      renderEntryRow(visibleEntry.id);
+    }
+
+    console.error("Failed to soft-delete current user hearted entries for word.", error);
   }
 }
 
@@ -937,30 +1241,55 @@ async function handleSaveMeaning(entryId) {
     return;
   }
 
-  const previousEditing = entry.isEditing;
-  const previousStatus = entry.saveStatus;
-  const previousDraft = entry.draftMeaning;
+  const isSameUserVisibleEntry = matchesCurrentUserEntry(entry);
+  const previousSnapshot = {
+    meaning: entry.meaning,
+    user: entry.user,
+    updatedTimestamp: entry.updatedTimestamp,
+    unheartedTimestamp: entry.unheartedTimestamp,
+    hearted: entry.hearted,
+    draftMeaning: entry.draftMeaning,
+    hasDraftCache: entry.hasDraftCache,
+    isEditing: entry.isEditing,
+    saveStatus: entry.saveStatus
+  };
 
   entry.isEditing = false;
   entry.saveStatus = "saving-meaning";
   renderEntryRow(entryId);
 
   try {
-    const newEntry = await createEditedEntry(entry, trimmedMeaning);
-
-    entry.saveStatus = "idle";
-    entry.isEditing = false;
-    entry.draftMeaning = previousDraft;
-
-    entriesById.set(newEntry.id, newEntry);
+    const identityId = await ensureCurrentUserIdentity();
     const previousCount = renderedGroupCount;
+    let preferredEntryId = entry.id;
+
+    if (isSameUserVisibleEntry) {
+      entry.user = identityId;
+      entry.meaning = trimmedMeaning;
+      entry.updatedTimestamp = Date.now();
+      entry.draftMeaning = trimmedMeaning;
+      entry.hasDraftCache = true;
+      entry.isEditing = false;
+      entry.saveStatus = "idle";
+      await putDictionaryRecord(entry);
+    } else {
+      await createEditedEntry(entry, trimmedMeaning, identityId, false);
+      entry.saveStatus = "idle";
+      entry.isEditing = false;
+    }
+
     rebuildGroupsFromEntries();
-    setStatus("");
-    renderDictionary(previousCount);
-    setSelectedEntry(newEntry.id);
+    refreshDictionaryView({ preserveCount: previousCount, preferredEntryId });
   } catch (error) {
-    entry.isEditing = previousEditing;
-    entry.saveStatus = previousStatus;
+    entry.meaning = previousSnapshot.meaning;
+    entry.user = previousSnapshot.user;
+    entry.updatedTimestamp = previousSnapshot.updatedTimestamp;
+    entry.unheartedTimestamp = previousSnapshot.unheartedTimestamp;
+    entry.hearted = previousSnapshot.hearted;
+    entry.draftMeaning = previousSnapshot.draftMeaning;
+    entry.hasDraftCache = previousSnapshot.hasDraftCache;
+    entry.isEditing = previousSnapshot.isEditing;
+    entry.saveStatus = previousSnapshot.saveStatus;
     renderEntryRow(entryId);
     console.error("Failed to save dictionary meaning.", error);
   }
@@ -1084,13 +1413,34 @@ async function handleDictionaryListClick(event) {
   }
 }
 
+function handleFilterClick(event) {
+  const button = event.target.closest(".dictionary-filter-btn[data-filter]");
+  if (!button) {
+    return;
+  }
+
+  const nextFilter = trimOrEmpty(button.dataset.filter);
+  if (!isValidFilter(nextFilter) || nextFilter === activeFilter) {
+    return;
+  }
+
+  activeFilter = nextFilter;
+  refreshDictionaryView();
+}
+
+function handleMyHeartsToggleClick() {
+  showOnlyMyHearts = !showOnlyMyHearts;
+  refreshDictionaryView();
+}
+
 async function loadDictionary() {
   if (!dictionaryList || !dictionaryStatus) {
     return;
   }
 
   if (!isDictionaryConfigured) {
-    setStatus("Dictionary is unavailable. Configure AWS guest access to load definitions.", "error");
+    setStatus("Dictionary is unavailable. Configure AWS guest access to load saved words.", "error");
+    updateFilterControls();
     updateSentinelVisibility();
     return;
   }
@@ -1100,12 +1450,14 @@ async function loadDictionary() {
   const ready = await ensureAwsCredentials();
   if (!ready) {
     setStatus("Could not initialize AWS guest credentials.", "error");
+    updateFilterControls();
     updateSentinelVisibility();
     return;
   }
 
   try {
-    const rawItems = await scanDefinedHeartedEntries();
+    await ensureCurrentUserIdentity();
+    const rawItems = await scanHeartedEntries();
 
     entriesById.clear();
     for (const rawItem of rawItems) {
@@ -1118,29 +1470,27 @@ async function loadDictionary() {
     }
 
     rebuildGroupsFromEntries();
-
-    if (groups.length === 0) {
-      if (dictionaryList) {
-        dictionaryList.textContent = "";
-      }
-
-      setStatus("No defined words yet.");
-      updateSentinelVisibility();
-      return;
-    }
-
-    setStatus("");
-    renderDictionary();
-    setupObserver();
+    refreshDictionaryView();
   } catch (error) {
     console.error("Failed to load dictionary entries.", error);
     setStatus("Failed to load dictionary entries.", "error");
+    updateFilterControls();
     updateSentinelVisibility();
   }
 }
 
+updateFilterControls();
+
 sharedAudio.addEventListener("ended", () => clearPlayState());
 sharedAudio.addEventListener("error", () => clearPlayState());
+
+if (dictionaryFilters) {
+  dictionaryFilters.addEventListener("click", handleFilterClick);
+}
+
+if (myHeartsToggle) {
+  myHeartsToggle.addEventListener("click", handleMyHeartsToggleClick);
+}
 
 if (dictionaryList) {
   dictionaryList.addEventListener("click", (event) => {
@@ -1152,7 +1502,12 @@ if (dictionaryList) {
 }
 
 document.addEventListener("click", (event) => {
-  if (event.target.closest(".dictionary-entry") || event.target.closest(".dictionary-history-toggle")) {
+  if (
+    event.target.closest(".dictionary-entry") ||
+    event.target.closest(".dictionary-history-toggle") ||
+    event.target.closest(".dictionary-filter-btn") ||
+    event.target.closest(".dictionary-toggle-btn")
+  ) {
     return;
   }
 

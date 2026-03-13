@@ -15,6 +15,30 @@
     <h1>xo Dictionary</h1>
 
     <section class="dictionary-section" aria-live="polite">
+      <div class="dictionary-toolbar">
+        <div id="dictionaryFilters" class="dictionary-filters" role="group" aria-label="Dictionary filters">
+          <button type="button" class="dictionary-filter-btn is-active" data-filter="defined" aria-pressed="true">
+            <span class="dictionary-filter-label">Defined</span>
+            <span class="dictionary-filter-count" data-filter-count="defined">0</span>
+          </button>
+          <button type="button" class="dictionary-filter-btn" data-filter="undefined" aria-pressed="false">
+            <span class="dictionary-filter-label">Undefined</span>
+            <span class="dictionary-filter-count" data-filter-count="undefined">0</span>
+          </button>
+          <button type="button" class="dictionary-filter-btn" data-filter="all" aria-pressed="false">
+            <span class="dictionary-filter-label">All</span>
+            <span class="dictionary-filter-count" data-filter-count="all">0</span>
+          </button>
+        </div>
+        <button
+          id="dictionaryMyHeartsToggle"
+          class="dictionary-toggle-btn"
+          type="button"
+          aria-pressed="false"
+        >
+          My Hearts
+        </button>
+      </div>
       <p id="dictionaryStatus" class="dictionary-status" role="status">Loading dictionary...</p>
       <ol id="dictionaryList" class="dictionary-list"></ol>
       <div id="dictionarySentinel" class="dictionary-sentinel" aria-hidden="true"></div>
