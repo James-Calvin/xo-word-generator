@@ -172,6 +172,24 @@
       return heartsTableClient;
     }
 
+    function applyAwsCredentialsToClients(credentials) {
+      const currentPollyClient = getPollyClient();
+      if (currentPollyClient && credentials) {
+        currentPollyClient.config.update({
+          region: awsConfig.region,
+          credentials
+        });
+      }
+
+      const currentHeartsClient = getHeartsTableClient();
+      if (currentHeartsClient && currentHeartsClient.service && credentials) {
+        currentHeartsClient.service.config.update({
+          region: awsConfig.region,
+          credentials
+        });
+      }
+    }
+
     function refreshAwsCredentials() {
       return new Promise((resolve, reject) => {
         if (!globalScope.AWS.config.credentials) {
@@ -190,9 +208,9 @@
       });
     }
 
-    function ensureAwsCredentials() {
+    async function ensureAwsCredentials() {
       if (!isPlaybackConfigured) {
-        return Promise.resolve(false);
+        return false;
       }
 
       if (!awsInitPromise) {
@@ -205,23 +223,7 @@
           });
 
           await refreshAwsCredentials();
-          const credentials = globalScope.AWS.config.credentials;
-
-          const currentPollyClient = getPollyClient();
-          if (currentPollyClient && credentials) {
-            currentPollyClient.config.update({
-              region: awsConfig.region,
-              credentials
-            });
-          }
-
-          const currentHeartsClient = getHeartsTableClient();
-          if (currentHeartsClient && currentHeartsClient.service && credentials) {
-            currentHeartsClient.service.config.update({
-              region: awsConfig.region,
-              credentials
-            });
-          }
+          applyAwsCredentialsToClients(globalScope.AWS.config.credentials);
 
           return true;
         })().catch((error) => {
@@ -231,7 +233,28 @@
         });
       }
 
-      return awsInitPromise;
+      const ready = await awsInitPromise;
+      if (!ready) {
+        return false;
+      }
+
+      try {
+        const credentials = globalScope.AWS.config.credentials;
+        if (!credentials) {
+          throw new Error("Missing AWS credentials object.");
+        }
+
+        if (!credentials.identityId || credentials.expired) {
+          await refreshAwsCredentials();
+        }
+
+        applyAwsCredentialsToClients(globalScope.AWS.config.credentials);
+        return true;
+      } catch (error) {
+        console.error("Failed to refresh AWS credentials.", error);
+        awsInitPromise = null;
+        return false;
+      }
     }
 
     async function getIdentityId() {

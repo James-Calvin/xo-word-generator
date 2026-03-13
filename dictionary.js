@@ -169,10 +169,6 @@ const getIdentityId =
   });
 
 async function ensureCurrentUserIdentity() {
-  if (currentUserId) {
-    return currentUserId;
-  }
-
   const resolvedIdentity = trimOrEmpty(await getIdentityId());
   if (!resolvedIdentity) {
     throw new Error("Could not resolve the current AWS identity.");
@@ -252,6 +248,8 @@ async function scanDictionaryEntries() {
   if (!currentHeartsClient) {
     return [];
   }
+
+  await ensureCurrentUserIdentity();
 
   const items = [];
   let lastEvaluatedKey = undefined;
@@ -989,6 +987,8 @@ async function putDictionaryRecord(record) {
   if (!isDictionaryConfigured || !currentHeartsClient) {
     throw new Error("Dictionary persistence is not configured.");
   }
+
+  await ensureCurrentUserIdentity();
 
   await currentHeartsClient
     .put({

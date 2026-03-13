@@ -32,6 +32,7 @@ const RETRY_LIMIT = 100;
 const COPY_FEEDBACK_MS = 1200;
 const LOCAL_STORAGE_ROWS_KEY = "xo.generated-rows.v1";
 const LOCAL_STORAGE_ROWS_VERSION = 2;
+const LOCAL_STORAGE_SYLLABLE_SETTINGS_KEY = "xo.syllable-settings.v1";
 const PERSIST_SAVE_DEBOUNCE_MS = 250;
 
 const DISPLAY_MEANING_SOURCES = {
@@ -421,7 +422,7 @@ function buildWordSlots(syllablePatterns) {
   return slots;
 }
 
-function clampSyllables() {
+function clampSyllables(shouldPersist = true) {
   let min = Number(minInput.value);
   let max = Number(maxInput.value);
 
@@ -441,6 +442,11 @@ function clampSyllables() {
 
   minInput.value = String(min);
   maxInput.value = String(max);
+
+  if (shouldPersist) {
+    saveSyllableSettings({ min, max });
+  }
+
   return { min, max };
 }
 
@@ -715,9 +721,9 @@ async function putCurrentUserRecord(state) {
   }
 
   const now = Date.now();
-  const identityId = trimOrEmpty(state.user) || trimOrEmpty(await getIdentityId());
+  const identityId = trimOrEmpty(await getIdentityId());
   const hasCanonicalRecord = Boolean(state.hasPersistedRecord && trimOrEmpty(state.recordRowId));
-  state.user = identityId;
+  state.user = trimOrEmpty(state.user) || identityId;
   state.recordRowId = trimOrEmpty(state.recordRowId) || buildCanonicalRecordRowId(identityId, state.word);
   if (!hasCanonicalRecord) {
     state.timestamp = now;
@@ -862,6 +868,60 @@ function getLocalStorageHandle() {
     return window.localStorage;
   } catch (error) {
     return null;
+  }
+}
+
+function saveSyllableSettings(settings) {
+  const storage = getLocalStorageHandle();
+  if (!storage || !settings || typeof settings !== "object") {
+    return;
+  }
+
+  const min = Number(settings.min);
+  const max = Number(settings.max);
+  if (!Number.isInteger(min) || !Number.isInteger(max)) {
+    return;
+  }
+
+  try {
+    storage.setItem(
+      LOCAL_STORAGE_SYLLABLE_SETTINGS_KEY,
+      JSON.stringify({
+        min,
+        max
+      })
+    );
+  } catch (error) {
+    console.error("Failed to save syllable settings.", error);
+  }
+}
+
+function loadPersistedSyllableSettings() {
+  const storage = getLocalStorageHandle();
+  if (!storage) {
+    return;
+  }
+
+  try {
+    const rawValue = storage.getItem(LOCAL_STORAGE_SYLLABLE_SETTINGS_KEY);
+    if (!rawValue) {
+      return;
+    }
+
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return;
+    }
+
+    if (typeof parsed.min !== "undefined") {
+      minInput.value = String(parsed.min);
+    }
+
+    if (typeof parsed.max !== "undefined") {
+      maxInput.value = String(parsed.max);
+    }
+  } catch (error) {
+    console.error("Failed to load syllable settings.", error);
   }
 }
 
@@ -1841,6 +1901,8 @@ async function handleResultListClick(event) {
 sharedAudio.addEventListener("ended", () => clearPlayState());
 sharedAudio.addEventListener("error", () => clearPlayState());
 
+loadPersistedSyllableSettings();
+clampSyllables();
 restorePersistedRows();
 
 resultsList.addEventListener("click", (event) => {
