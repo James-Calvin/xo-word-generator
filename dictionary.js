@@ -9,8 +9,7 @@ const FILTERS = {
 
 const GROUP_CLASSIFICATIONS = {
   DEFINED: "defined",
-  UNDEFINED: "undefined",
-  MIXED: "mixed"
+  UNDEFINED: "undefined"
 };
 
 const EMPTY_STATUS_BY_FILTER = {
@@ -28,7 +27,7 @@ const filterButtons = dictionaryFilters
   ? Array.from(dictionaryFilters.querySelectorAll(".dictionary-filter-btn[data-filter]"))
   : [];
 
-const entriesById = new Map();
+const recordsById = new Map();
 const audioCache = new Map();
 const copyFeedbackTimers = new Map();
 const sharedAudio = new Audio();
@@ -38,8 +37,8 @@ let visibleGroups = [];
 let activeFilter = FILTERS.DEFINED;
 let currentUserId = "";
 let showOnlyMyHearts = false;
-let selectedEntryId = null;
-let playingEntryId = null;
+let selectedWord = "";
+let playingRecordId = "";
 let renderedGroupCount = 0;
 let observer = null;
 
@@ -63,10 +62,6 @@ const toEpochMs =
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed : 0;
       };
-const createRowId =
-  typeof sharedUtils.createRowId === "function"
-    ? sharedUtils.createRowId
-    : () => `row-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 const escapeXml =
   typeof sharedUtils.escapeXml === "function"
     ? sharedUtils.escapeXml
@@ -109,20 +104,28 @@ const buildCopyPayload =
         return normalizedMeaning ? `${base} : ${normalizedMeaning}` : base;
       };
 
-function hasDefinedMeaning(entry) {
-  return hasMeaningText(entry && entry.meaning);
+function getActivityTimestamp(record) {
+  return Math.max(toEpochMs(record && record.updatedTimestamp), toEpochMs(record && record.timestamp));
 }
 
-function matchesCurrentUserEntry(entry) {
-  return Boolean(currentUserId) && Boolean(entry) && trimOrEmpty(entry.user) === currentUserId;
-}
-
-function getEntryActivityTimestamp(entry) {
-  return Math.max(toEpochMs(entry.updatedTimestamp), toEpochMs(entry.timestamp));
+function buildCanonicalRecordRowId(userId, word) {
+  return `${encodeURIComponent(trimOrEmpty(userId))}::${encodeURIComponent(trimOrEmpty(word))}`;
 }
 
 function buildEntryId(rowId, timestamp) {
   return `${rowId}|${timestamp}`;
+}
+
+function hasDefinedMeaning(record) {
+  return hasMeaningText(record && record.meaning);
+}
+
+function matchesCurrentUserRecord(record) {
+  return Boolean(currentUserId) && Boolean(record) && trimOrEmpty(record.user) === currentUserId;
+}
+
+function sortRecordsByActivityDesc(records) {
+  return [...records].sort((left, right) => getActivityTimestamp(right) - getActivityTimestamp(left));
 }
 
 function isValidFilter(filter) {
@@ -134,15 +137,7 @@ function getEmptyStatusMessage(filter = activeFilter) {
 }
 
 function getGroupStatusLabel(classification) {
-  if (classification === GROUP_CLASSIFICATIONS.MIXED) {
-    return "Mixed";
-  }
-
-  if (classification === GROUP_CLASSIFICATIONS.UNDEFINED) {
-    return "Undefined";
-  }
-
-  return "Defined";
+  return classification === GROUP_CLASSIFICATIONS.UNDEFINED ? "Undefined" : "Defined";
 }
 
 const normalizedAwsConfig =
@@ -207,12 +202,207 @@ function setStatus(message, type = "info") {
   }
 }
 
+function normalizeDictionaryEntry(rawItem) {
+  if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+    return null;
+  }
+
+  const rowId = trimOrEmpty(rawItem.rowId);
+  const word = trimOrEmpty(rawItem.word);
+  const pronunciation = trimOrEmpty(rawItem.pronunciation || rawItem.ipa);
+  if (!rowId || !word || !pronunciation) {
+    return null;
+  }
+
+  const timestamp = toEpochMs(rawItem.timestamp) || Date.now();
+  const updatedTimestamp = toEpochMs(rawItem.updatedTimestamp) || timestamp;
+  const rawUnheartedTimestamp = toEpochMs(rawItem.unheartedTimestamp);
+
+  return {
+    id: buildEntryId(rowId, timestamp),
+    rowId,
+    timestamp,
+    updatedTimestamp,
+    unheartedTimestamp: rawUnheartedTimestamp > 0 ? rawUnheartedTimestamp : null,
+    user: trimOrEmpty(rawItem.user),
+    word,
+    pronunciation,
+    meaning: hasMeaningText(rawItem.meaning) ? trimOrEmpty(rawItem.meaning) : null,
+    hearted: Boolean(rawItem.hearted),
+    copyFlash: false
+  };
+}
+
+function buildDictionaryTableItem(record) {
+  return {
+    rowId: record.rowId,
+    timestamp: record.timestamp,
+    user: record.user || null,
+    word: record.word,
+    pronunciation: record.pronunciation,
+    meaning: record.meaning || null,
+    hearted: Boolean(record.hearted),
+    updatedTimestamp: record.updatedTimestamp,
+    unheartedTimestamp: record.unheartedTimestamp ?? null
+  };
+}
+
+async function scanDictionaryEntries() {
+  const currentHeartsClient = getHeartsTableClient();
+  if (!currentHeartsClient) {
+    return [];
+  }
+
+  const items = [];
+  let lastEvaluatedKey = undefined;
+
+  do {
+    const response = await currentHeartsClient
+      .scan({
+        TableName: awsConfig.heartsTableName,
+        ExpressionAttributeNames: {
+          "#rowId": "rowId",
+          "#word": "word",
+          "#pronunciation": "pronunciation",
+          "#meaning": "meaning",
+          "#hearted": "hearted",
+          "#timestamp": "timestamp",
+          "#updatedTimestamp": "updatedTimestamp",
+          "#user": "user",
+          "#unheartedTimestamp": "unheartedTimestamp"
+        },
+        ProjectionExpression:
+          "#rowId, #word, #pronunciation, #meaning, #hearted, #timestamp, #updatedTimestamp, #user, #unheartedTimestamp",
+        ExclusiveStartKey: lastEvaluatedKey
+      })
+      .promise();
+
+    if (Array.isArray(response.Items) && response.Items.length > 0) {
+      items.push(...response.Items);
+    }
+
+    lastEvaluatedKey = response.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return items;
+}
+
+function getGroupByWord(word) {
+  return groups.find((group) => group.word === word) || null;
+}
+
+function isGroupVisible(group) {
+  if (!group || !group.isDictionaryVisible) {
+    return false;
+  }
+
+  if (showOnlyMyHearts && !group.hasCurrentUserHeart) {
+    return false;
+  }
+
+  if (activeFilter === FILTERS.UNDEFINED) {
+    return group.classification === GROUP_CLASSIFICATIONS.UNDEFINED;
+  }
+
+  if (activeFilter === FILTERS.ALL) {
+    return true;
+  }
+
+  return group.classification === GROUP_CLASSIFICATIONS.DEFINED;
+}
+
+function rebuildGroupsFromEntries() {
+  const previousGroupsByWord = new Map(groups.map((group) => [group.word, group]));
+  const recordsByWord = new Map();
+
+  for (const record of recordsById.values()) {
+    if (!recordsByWord.has(record.word)) {
+      recordsByWord.set(record.word, []);
+    }
+
+    recordsByWord.get(record.word).push(record);
+  }
+
+  const nextGroups = [];
+  for (const [word, wordRecords] of recordsByWord.entries()) {
+    const sortedRecords = sortRecordsByActivityDesc(wordRecords);
+    const definitionHistory = sortedRecords.filter((record) => hasDefinedMeaning(record));
+    const currentUserRecord = sortedRecords.find((record) => matchesCurrentUserRecord(record)) || null;
+    const hasAnyHeart = sortedRecords.some((record) => record.hearted);
+    const isDictionaryVisible = hasAnyHeart || definitionHistory.length > 0;
+
+    if (!isDictionaryVisible) {
+      continue;
+    }
+
+    const displayRecord = definitionHistory[0] || sortedRecords[0] || null;
+    const previousGroup = previousGroupsByWord.get(word);
+    const currentUserMeaning = currentUserRecord && hasDefinedMeaning(currentUserRecord)
+      ? currentUserRecord.meaning
+      : "";
+    const draftMeaning =
+      previousGroup && previousGroup.hasDraftCache
+        ? previousGroup.draftMeaning
+        : currentUserMeaning;
+
+    nextGroups.push({
+      word,
+      pronunciation: trimOrEmpty(
+        (displayRecord && displayRecord.pronunciation) ||
+          (currentUserRecord && currentUserRecord.pronunciation) ||
+          (sortedRecords[0] && sortedRecords[0].pronunciation)
+      ),
+      records: sortedRecords,
+      displayRecord,
+      definitionHistory,
+      currentUserRecord,
+      hasCurrentUserHeart: Boolean(currentUserRecord && currentUserRecord.hearted),
+      isDictionaryVisible,
+      classification:
+        definitionHistory.length > 0
+          ? GROUP_CLASSIFICATIONS.DEFINED
+          : GROUP_CLASSIFICATIONS.UNDEFINED,
+      expanded: Boolean(previousGroup && previousGroup.expanded),
+      draftMeaning,
+      hasDraftCache:
+        (previousGroup && previousGroup.hasDraftCache) ||
+        hasMeaningText(draftMeaning),
+      isEditing: Boolean(previousGroup && previousGroup.isEditing),
+      saveStatus: previousGroup ? previousGroup.saveStatus : "idle",
+      latestActivityTimestamp: sortedRecords.reduce(
+        (maxTimestamp, record) => Math.max(maxTimestamp, getActivityTimestamp(record)),
+        0
+      )
+    });
+  }
+
+  nextGroups.sort((left, right) => {
+    const timestampDiff = right.latestActivityTimestamp - left.latestActivityTimestamp;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+
+    return left.word.localeCompare(right.word);
+  });
+
+  groups = nextGroups;
+}
+
+function rebuildVisibleGroups() {
+  visibleGroups = groups.filter((group) => isGroupVisible(group));
+  updateFilterControls();
+}
+
 function getFilterCounts() {
   const sourceGroups = showOnlyMyHearts ? groups.filter((group) => group.hasCurrentUserHeart) : groups;
   let definedCount = 0;
   let undefinedCount = 0;
 
   for (const group of sourceGroups) {
+    if (!group.isDictionaryVisible) {
+      continue;
+    }
+
     if (group.classification === GROUP_CLASSIFICATIONS.UNDEFINED) {
       undefinedCount += 1;
     } else {
@@ -223,7 +413,7 @@ function getFilterCounts() {
   return {
     [FILTERS.DEFINED]: definedCount,
     [FILTERS.UNDEFINED]: undefinedCount,
-    [FILTERS.ALL]: sourceGroups.length
+    [FILTERS.ALL]: definedCount + undefinedCount
   };
 }
 
@@ -257,250 +447,46 @@ function updateSentinelVisibility() {
   dictionarySentinel.classList.toggle("is-hidden", hide);
 }
 
-function normalizeDictionaryEntry(rawItem) {
-  if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
-    return null;
-  }
-
-  const rowId = trimOrEmpty(rawItem.rowId);
-  const word = trimOrEmpty(rawItem.word);
-  const pronunciation = trimOrEmpty(rawItem.pronunciation || rawItem.ipa);
-  const hearted = Boolean(rawItem.hearted);
-
-  if (!rowId || !word || !pronunciation || !hearted) {
-    return null;
-  }
-
-  const timestamp = toEpochMs(rawItem.timestamp) || Date.now();
-  const updatedTimestamp = toEpochMs(rawItem.updatedTimestamp) || timestamp;
-  const rawUnheartedTimestamp = toEpochMs(rawItem.unheartedTimestamp);
-
-  return {
-    id: buildEntryId(rowId, timestamp),
-    rowId,
-    timestamp,
-    updatedTimestamp,
-    unheartedTimestamp: rawUnheartedTimestamp > 0 ? rawUnheartedTimestamp : null,
-    user: trimOrEmpty(rawItem.user),
-    word,
-    pronunciation,
-    meaning: trimOrEmpty(rawItem.meaning),
-    hearted: true,
-    draftMeaning: "",
-    hasDraftCache: false,
-    isEditing: false,
-    saveStatus: "idle",
-    copyFlash: false
-  };
-}
-
-function buildDictionaryTableItem(entry) {
-  return {
-    rowId: entry.rowId,
-    timestamp: entry.timestamp,
-    user: entry.user || null,
-    word: entry.word,
-    pronunciation: entry.pronunciation,
-    meaning: entry.meaning || null,
-    hearted: Boolean(entry.hearted),
-    updatedTimestamp: entry.updatedTimestamp,
-    unheartedTimestamp: entry.unheartedTimestamp ?? null
-  };
-}
-
-async function scanHeartedEntries() {
-  const currentHeartsClient = getHeartsTableClient();
-  if (!currentHeartsClient) {
+function getHistoryEntriesForGroup(group) {
+  if (!group || group.definitionHistory.length <= 1) {
     return [];
   }
 
-  const items = [];
-  let lastEvaluatedKey = undefined;
-
-  do {
-    const response = await currentHeartsClient
-      .scan({
-        TableName: awsConfig.heartsTableName,
-        FilterExpression: "#hearted = :hearted",
-        ExpressionAttributeNames: {
-          "#rowId": "rowId",
-          "#word": "word",
-          "#pronunciation": "pronunciation",
-          "#meaning": "meaning",
-          "#hearted": "hearted",
-          "#timestamp": "timestamp",
-          "#updatedTimestamp": "updatedTimestamp",
-          "#user": "user",
-          "#unheartedTimestamp": "unheartedTimestamp"
-        },
-        ExpressionAttributeValues: {
-          ":hearted": true
-        },
-        ProjectionExpression:
-          "#rowId, #word, #pronunciation, #meaning, #hearted, #timestamp, #updatedTimestamp, #user, #unheartedTimestamp",
-        ExclusiveStartKey: lastEvaluatedKey
-      })
-      .promise();
-
-    if (Array.isArray(response.Items) && response.Items.length > 0) {
-      items.push(...response.Items);
-    }
-
-    lastEvaluatedKey = response.LastEvaluatedKey;
-  } while (lastEvaluatedKey);
-
-  return items;
+  return group.definitionHistory.slice(1);
 }
 
-function rebuildGroupsFromEntries() {
-  const expandedByWord = new Map(groups.map((group) => [group.word, group.expanded]));
-  const entriesByWord = new Map();
-
-  for (const entry of entriesById.values()) {
-    if (!entry.hearted) {
-      continue;
-    }
-
-    if (!entriesByWord.has(entry.word)) {
-      entriesByWord.set(entry.word, []);
-    }
-
-    entriesByWord.get(entry.word).push(entry);
-  }
-
-  const nextGroups = [];
-  for (const [word, wordEntries] of entriesByWord.entries()) {
-    const definedEntries = [];
-    const undefinedEntries = [];
-
-    for (const entry of wordEntries) {
-      if (hasDefinedMeaning(entry)) {
-        definedEntries.push(entry);
-      } else {
-        undefinedEntries.push(entry);
-      }
-    }
-
-    definedEntries.sort((left, right) => getEntryActivityTimestamp(right) - getEntryActivityTimestamp(left));
-    undefinedEntries.sort(
-      (left, right) => getEntryActivityTimestamp(right) - getEntryActivityTimestamp(left)
-    );
-
-    if (definedEntries.length === 0 && undefinedEntries.length === 0) {
-      continue;
-    }
-
-    const classification =
-      definedEntries.length > 0
-        ? undefinedEntries.length > 0
-          ? GROUP_CLASSIFICATIONS.MIXED
-          : GROUP_CLASSIFICATIONS.DEFINED
-        : GROUP_CLASSIFICATIONS.UNDEFINED;
-
-    const latestActivityTimestamp = wordEntries.reduce(
-      (maxTimestamp, entry) => Math.max(maxTimestamp, getEntryActivityTimestamp(entry)),
-      0
-    );
-
-    nextGroups.push({
-      word,
-      definedEntries,
-      undefinedEntries,
-      classification,
-      currentUserHeartedEntries: wordEntries.filter((entry) => matchesCurrentUserEntry(entry)),
-      hasCurrentUserHeart: wordEntries.some((entry) => matchesCurrentUserEntry(entry)),
-      expanded: Boolean(expandedByWord.get(word)),
-      latestActivityTimestamp
-    });
-  }
-
-  nextGroups.sort((left, right) => {
-    const timestampDiff = right.latestActivityTimestamp - left.latestActivityTimestamp;
-    if (timestampDiff !== 0) {
-      return timestampDiff;
-    }
-
-    return left.word.localeCompare(right.word);
+function getGroupCopyPayload(group, record) {
+  return buildCopyPayload({
+    word: group.word,
+    pronunciation: record.pronunciation,
+    ipa: record.pronunciation,
+    meaning: hasDefinedMeaning(record) ? record.meaning : ""
   });
-
-  groups = nextGroups;
 }
 
-function getVisibleEntriesForGroup(group) {
-  if (!group) {
-    return [];
-  }
-
-  if (activeFilter === FILTERS.UNDEFINED) {
-    return group.undefinedEntries;
-  }
-
-  if (activeFilter === FILTERS.ALL) {
-    return [...group.definedEntries, ...group.undefinedEntries];
-  }
-
-  return group.definedEntries;
-}
-
-function isGroupVisible(group) {
-  if (!group) {
-    return false;
-  }
-
-  if (showOnlyMyHearts && !group.hasCurrentUserHeart) {
-    return false;
-  }
-
-  if (activeFilter === FILTERS.UNDEFINED) {
-    return group.classification === GROUP_CLASSIFICATIONS.UNDEFINED;
-  }
-
-  if (activeFilter === FILTERS.ALL) {
-    return true;
-  }
-
-  return group.classification !== GROUP_CLASSIFICATIONS.UNDEFINED;
-}
-
-function rebuildVisibleGroups() {
-  visibleGroups = groups.filter((group) => isGroupVisible(group) && getVisibleEntriesForGroup(group).length > 0);
-  updateFilterControls();
-}
-
-function getEntryRow(entryId) {
-  if (!dictionaryList) {
-    return null;
-  }
-
-  const rows = dictionaryList.querySelectorAll(".dictionary-entry");
-  for (const row of rows) {
-    if (row.dataset.entryId === entryId) {
-      return row;
-    }
-  }
-
-  return null;
-}
-
-function renderEntryMeaning(row, entry) {
+function renderRecordMeaning(row, group, record, isHistoryEntry) {
   const container = row.querySelector(".row-meaning");
   if (!container) {
     return;
   }
 
   container.textContent = "";
-  const isSelected = selectedEntryId === entry.id;
-  const isSaving = entry.saveStatus !== "idle";
-  const hasMeaning = hasDefinedMeaning(entry);
-
-  if (hasMeaning) {
+  if (hasDefinedMeaning(record)) {
     const definition = document.createElement("span");
     definition.className = "meaning-definition";
-    definition.textContent = `— ${entry.meaning}`;
+    definition.textContent = `— ${record.meaning}`;
     container.appendChild(definition);
   }
 
-  if (entry.isEditing && isSelected) {
+  if (isHistoryEntry) {
+    return;
+  }
+
+  if (selectedWord !== group.word) {
+    return;
+  }
+
+  if (group.isEditing) {
     const editor = document.createElement("div");
     editor.className = "meaning-editor";
 
@@ -508,9 +494,9 @@ function renderEntryMeaning(row, entry) {
     input.type = "text";
     input.className = "meaning-input";
     input.placeholder = "What does this word mean?";
-    input.value = entry.draftMeaning;
+    input.value = group.draftMeaning;
 
-    const saveButton = createActionButton("meaning-action is-save", "✓", "Save meaning", "save-meaning");
+    const saveButton = createActionButton("meaning-action is-save", "✓", "Save my meaning", "save-meaning");
     const cancelButton = createActionButton(
       "meaning-action",
       "✕",
@@ -518,7 +504,7 @@ function renderEntryMeaning(row, entry) {
       "cancel-meaning"
     );
 
-    if (isSaving) {
+    if (group.saveStatus !== "idle") {
       input.disabled = true;
       saveButton.disabled = true;
       cancelButton.disabled = true;
@@ -534,81 +520,69 @@ function renderEntryMeaning(row, entry) {
     return;
   }
 
-  if (!isSelected) {
-    return;
-  }
-
   const link = document.createElement("button");
   link.type = "button";
   link.className = "meaning-link";
   link.dataset.action = "open-meaning-editor";
-  link.textContent = hasMeaning ? "Edit" : "Add a meaning";
-  link.disabled = isSaving;
+  link.textContent =
+    group.currentUserRecord && hasDefinedMeaning(group.currentUserRecord)
+      ? "Edit my meaning"
+      : hasMeaningText(group.draftMeaning)
+        ? "Edit my meaning"
+        : "Add my meaning";
+  link.disabled = group.saveStatus !== "idle";
   container.appendChild(link);
 }
 
-function applyEntryRowState(row, entry) {
-  row.classList.toggle("is-selected", selectedEntryId === entry.id);
+function applyRecordRowState(row, group, record, isHistoryEntry) {
+  row.classList.toggle("is-selected", !isHistoryEntry && selectedWord === group.word);
 
   const heartButton = row.querySelector(".heart-btn");
   if (heartButton) {
-    const group = getGroupByWord(entry.word);
-    const showHeartButton = Boolean(group && group.hasCurrentUserHeart);
-    heartButton.classList.toggle("is-hidden", !showHeartButton);
-    heartButton.classList.toggle("is-hearted", showHeartButton);
-    heartButton.textContent = "❤";
-    heartButton.setAttribute("aria-label", "Remove my saved word");
-    heartButton.disabled = !showHeartButton || entry.saveStatus !== "idle";
+    heartButton.classList.toggle("is-hidden", isHistoryEntry);
+    heartButton.classList.toggle("is-hearted", group.hasCurrentUserHeart);
+    heartButton.textContent = group.hasCurrentUserHeart ? "❤" : "♡";
+    heartButton.setAttribute("aria-label", group.hasCurrentUserHeart ? "Remove saved word" : "Save word");
+    heartButton.disabled = isHistoryEntry || group.saveStatus !== "idle";
   }
 
   const copyButton = row.querySelector(".copy-btn");
   if (copyButton) {
-    copyButton.classList.toggle("is-success", entry.copyFlash);
-    copyButton.textContent = entry.copyFlash ? "✓" : copyButton.dataset.icon;
+    copyButton.classList.toggle("is-success", Boolean(record.copyFlash));
+    copyButton.textContent = record.copyFlash ? "✓" : copyButton.dataset.icon;
   }
 
   const playButton = row.querySelector(".play-btn");
   if (playButton) {
-    const isPlaying = playingEntryId === entry.id;
+    const isPlaying = playingRecordId === record.id;
     playButton.classList.toggle("is-playing", isPlaying);
     playButton.classList.remove("is-loading");
     playButton.textContent = isPlaying ? "■" : playButton.dataset.icon;
   }
 
-  renderEntryMeaning(row, entry);
+  renderRecordMeaning(row, group, record, isHistoryEntry);
 }
 
-function renderEntryRow(entryId) {
-  const entry = entriesById.get(entryId);
-  const row = getEntryRow(entryId);
-  if (!entry || !row) {
-    return;
-  }
-
-  applyEntryRowState(row, entry);
-}
-
-function createEntryRowElement(entry, isHistoryEntry) {
+function createRecordRowElement(group, record, isHistoryEntry) {
   const row = document.createElement("div");
   row.className = "result-row dictionary-entry";
   if (isHistoryEntry) {
     row.classList.add("dictionary-history-entry");
   }
 
-  row.dataset.entryId = entry.id;
-  row.dataset.word = entry.word;
+  row.dataset.word = group.word;
+  row.dataset.recordId = record.id;
 
   const actions = document.createElement("div");
   actions.className = "row-actions";
-
-  const heartButton = createActionButton("heart-btn", "❤", "Remove saved word", "toggle-heart");
-
-  const copyButton = createActionButton("copy-btn", "⧉", "Copy word details", "copy-word");
 
   const playButton = createActionButton("play-btn", "▶", "Play pronunciation", "play-pronunciation");
   if (!isPlaybackConfigured) {
     playButton.classList.add("is-hidden");
   }
+
+  const heartButton = createActionButton("heart-btn", "♡", "Save word", "toggle-heart");
+  const copyButton = createActionButton("copy-btn", "⧉", "Copy word details", "copy-word");
 
   actions.append(playButton, heartButton);
 
@@ -617,11 +591,11 @@ function createEntryRowElement(entry, isHistoryEntry) {
 
   const wordSpan = document.createElement("span");
   wordSpan.className = "word";
-  wordSpan.textContent = entry.word;
+  wordSpan.textContent = group.word;
 
   const ipaSpan = document.createElement("span");
   ipaSpan.className = "ipa";
-  ipaSpan.textContent = `/${entry.pronunciation}/`;
+  ipaSpan.textContent = `/${record.pronunciation}/`;
 
   content.append(wordSpan, ipaSpan);
 
@@ -633,17 +607,17 @@ function createEntryRowElement(entry, isHistoryEntry) {
   copySlot.append(copyButton);
 
   row.append(actions, content, meaning, copySlot);
-  applyEntryRowState(row, entry);
-
+  applyRecordRowState(row, group, record, isHistoryEntry);
   return row;
 }
 
 function createGroupCard(group) {
-  const visibleEntries = getVisibleEntriesForGroup(group);
-  if (visibleEntries.length === 0) {
+  const displayRecord = group.displayRecord;
+  if (!displayRecord) {
     return null;
   }
 
+  const historyEntries = getHistoryEntriesForGroup(group);
   const card = document.createElement("li");
   card.className = "dictionary-card";
   card.dataset.word = group.word;
@@ -665,29 +639,29 @@ function createGroupCard(group) {
   wordMeta.append(title, badge);
   header.appendChild(wordMeta);
 
-  if (visibleEntries.length > 1) {
+  if (historyEntries.length > 0) {
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "dictionary-history-toggle";
     toggle.dataset.action = "toggle-history";
     toggle.dataset.word = group.word;
-    toggle.textContent = group.expanded ? "Hide history" : `Show history (${visibleEntries.length - 1})`;
+    toggle.textContent = group.expanded ? "Hide definitions" : `See more (${historyEntries.length})`;
     header.appendChild(toggle);
   }
 
   const main = document.createElement("div");
   main.className = "dictionary-main";
-  main.appendChild(createEntryRowElement(visibleEntries[0], false));
+  main.appendChild(createRecordRowElement(group, displayRecord, false));
 
   card.append(header, main);
 
-  if (visibleEntries.length > 1) {
+  if (historyEntries.length > 0) {
     const history = document.createElement("div");
     history.className = "dictionary-history";
     history.hidden = !group.expanded;
 
-    for (let i = 1; i < visibleEntries.length; i += 1) {
-      history.appendChild(createEntryRowElement(visibleEntries[i], true));
+    for (const historyRecord of historyEntries) {
+      history.appendChild(createRecordRowElement(group, historyRecord, true));
     }
 
     card.appendChild(history);
@@ -781,120 +755,58 @@ function setupObserver() {
   observer.observe(dictionarySentinel);
 }
 
-function clearCopyFeedback(entryId) {
-  const timer = copyFeedbackTimers.get(entryId);
+function clearCopyFeedback(recordId) {
+  const timer = copyFeedbackTimers.get(recordId);
   if (!timer) {
     return;
   }
 
   window.clearTimeout(timer);
-  copyFeedbackTimers.delete(entryId);
+  copyFeedbackTimers.delete(recordId);
 }
 
-function showCopySuccess(entryId) {
-  const entry = entriesById.get(entryId);
-  if (!entry) {
-    return;
-  }
-
-  clearCopyFeedback(entryId);
-  entry.copyFlash = true;
-  renderEntryRow(entryId);
-
-  const timer = window.setTimeout(() => {
-    const current = entriesById.get(entryId);
-    if (!current) {
-      return;
-    }
-
-    current.copyFlash = false;
-    renderEntryRow(entryId);
-    copyFeedbackTimers.delete(entryId);
-  }, COPY_FEEDBACK_MS);
-
-  copyFeedbackTimers.set(entryId, timer);
+function isWordVisible(word) {
+  return visibleGroups.some((group) => group.word === word);
 }
 
-function isEntryVisible(entryId) {
-  if (!entryId) {
-    return false;
-  }
+function getVisibleRecordIds() {
+  const visibleIds = new Set();
 
   for (const group of visibleGroups) {
-    const visibleEntries = getVisibleEntriesForGroup(group);
-    if (visibleEntries.some((entry) => entry.id === entryId)) {
-      return true;
+    if (group.displayRecord) {
+      visibleIds.add(group.displayRecord.id);
+    }
+
+    if (group.expanded) {
+      for (const historyRecord of getHistoryEntriesForGroup(group)) {
+        visibleIds.add(historyRecord.id);
+      }
     }
   }
 
-  return false;
+  return visibleIds;
 }
 
-function setSelectedEntry(entryId) {
-  if (!entryId || selectedEntryId === entryId) {
-    return;
+function syncVisibleState(preferredWord = "") {
+  if (preferredWord && isWordVisible(preferredWord)) {
+    selectedWord = preferredWord;
+  } else if (selectedWord && !isWordVisible(selectedWord)) {
+    selectedWord = "";
   }
 
-  const previous = selectedEntryId;
-  selectedEntryId = entryId;
-
-  if (playingEntryId && playingEntryId !== entryId) {
-    stopAudio();
-  }
-
-  if (previous) {
-    renderEntryRow(previous);
-  }
-
-  renderEntryRow(entryId);
-}
-
-function clearSelection() {
-  if (!selectedEntryId) {
-    return;
-  }
-
-  const previous = selectedEntryId;
-  selectedEntryId = null;
-  renderEntryRow(previous);
-}
-
-function clearPlayState() {
-  if (!playingEntryId) {
-    return;
-  }
-
-  const previous = playingEntryId;
-  playingEntryId = null;
-  renderEntryRow(previous);
-}
-
-function stopAudio() {
-  sharedAudio.pause();
-  sharedAudio.currentTime = 0;
-  clearPlayState();
-}
-
-function syncVisibleState(preferredEntryId = "") {
-  if (playingEntryId && !isEntryVisible(playingEntryId)) {
-    stopAudio();
-  }
-
-  if (preferredEntryId && isEntryVisible(preferredEntryId)) {
-    if (selectedEntryId !== preferredEntryId) {
-      setSelectedEntry(preferredEntryId);
+  if (playingRecordId) {
+    const visibleIds = getVisibleRecordIds();
+    if (!visibleIds.has(playingRecordId)) {
+      sharedAudio.pause();
+      sharedAudio.currentTime = 0;
+      playingRecordId = "";
     }
-    return;
-  }
-
-  if (selectedEntryId && !isEntryVisible(selectedEntryId)) {
-    selectedEntryId = null;
   }
 }
 
 function refreshDictionaryView(options = {}) {
   const preserveCount = Number(options.preserveCount) > 0 ? Number(options.preserveCount) : 0;
-  const preferredEntryId = trimOrEmpty(options.preferredEntryId);
+  const preferredWord = trimOrEmpty(options.preferredWord);
 
   rebuildVisibleGroups();
 
@@ -919,7 +831,7 @@ function refreshDictionaryView(options = {}) {
   setStatus("");
   renderDictionary(preserveCount);
   setupObserver();
-  syncVisibleState(preferredEntryId);
+  syncVisibleState(preferredWord);
 }
 
 async function synthesize(word, ipa) {
@@ -970,135 +882,109 @@ async function synthesize(word, ipa) {
   return objectUrl;
 }
 
-async function playPronunciation(entryId) {
+async function playPronunciation(recordId) {
   if (!isPlaybackConfigured) {
     return;
   }
 
-  const entry = entriesById.get(entryId);
-  const row = getEntryRow(entryId);
-  if (!entry || !row) {
+  const record = recordsById.get(recordId);
+  if (!record) {
     return;
   }
 
-  const button = row.querySelector(".play-btn");
-  if (!button || button.classList.contains("is-hidden")) {
+  if (playingRecordId === recordId && !sharedAudio.paused) {
+    sharedAudio.pause();
+    sharedAudio.currentTime = 0;
+    playingRecordId = "";
+    refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
     return;
   }
 
-  if (playingEntryId === entryId && !sharedAudio.paused) {
-    stopAudio();
-    return;
-  }
-
-  if (playingEntryId && playingEntryId !== entryId) {
-    stopAudio();
-  }
-
-  button.classList.add("is-loading");
-  button.textContent = "...";
+  const previousPlayingRecordId = playingRecordId;
 
   try {
-    const audioUrl = await synthesize(entry.word, entry.pronunciation);
+    const audioUrl = await synthesize(record.word, record.pronunciation);
     if (!audioUrl) {
-      button.classList.remove("is-loading");
-      button.textContent = button.dataset.icon;
       return;
     }
 
     sharedAudio.pause();
     sharedAudio.currentTime = 0;
     sharedAudio.src = audioUrl;
-
     await sharedAudio.play();
 
-    playingEntryId = entryId;
-    renderEntryRow(entryId);
+    playingRecordId = recordId;
+    refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
   } catch (error) {
-    button.classList.remove("is-loading");
-    button.textContent = button.dataset.icon;
+    playingRecordId = previousPlayingRecordId;
     console.error("Failed to synthesize or play pronunciation.", error);
   }
 }
 
-function getGroupByWord(word) {
-  for (const group of groups) {
-    if (group.word === word) {
-      return group;
+function showCopySuccess(recordId) {
+  const record = recordsById.get(recordId);
+  if (!record) {
+    return;
+  }
+
+  clearCopyFeedback(recordId);
+  record.copyFlash = true;
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
+
+  const timer = window.setTimeout(() => {
+    const current = recordsById.get(recordId);
+    if (!current) {
+      return;
     }
-  }
 
-  return null;
-}
+    current.copyFlash = false;
+    copyFeedbackTimers.delete(recordId);
+    refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
+  }, COPY_FEEDBACK_MS);
 
-function getCardByWord(word) {
-  if (!dictionaryList) {
-    return null;
-  }
-
-  const cards = dictionaryList.querySelectorAll(".dictionary-card");
-  for (const card of cards) {
-    if (card.dataset.word === word) {
-      return card;
-    }
-  }
-
-  return null;
+  copyFeedbackTimers.set(recordId, timer);
 }
 
 function toggleHistory(word) {
   const group = getGroupByWord(word);
-  const visibleEntries = getVisibleEntriesForGroup(group);
-  if (!group || visibleEntries.length <= 1) {
+  if (!group || getHistoryEntriesForGroup(group).length === 0) {
     return;
   }
 
   group.expanded = !group.expanded;
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: word || selectedWord });
+}
 
-  const card = getCardByWord(word);
-  if (!card) {
-    renderDictionary(renderedGroupCount);
-    syncVisibleState();
+function openMeaningEditor(word) {
+  const group = getGroupByWord(word);
+  if (!group) {
     return;
   }
 
-  const history = card.querySelector(".dictionary-history");
-  if (history) {
-    history.hidden = !group.expanded;
+  if (!group.hasDraftCache) {
+    group.draftMeaning =
+      group.currentUserRecord && hasDefinedMeaning(group.currentUserRecord)
+        ? group.currentUserRecord.meaning
+        : "";
+    group.hasDraftCache = true;
   }
 
-  const toggle = card.querySelector(".dictionary-history-toggle");
-  if (toggle) {
-    toggle.textContent = group.expanded ? "Hide history" : `Show history (${visibleEntries.length - 1})`;
-  }
+  group.isEditing = true;
+  selectedWord = word;
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: word });
 }
 
-function openMeaningEditor(entryId) {
-  const entry = entriesById.get(entryId);
-  if (!entry) {
+function closeMeaningEditor(word) {
+  const group = getGroupByWord(word);
+  if (!group) {
     return;
   }
 
-  if (!entry.hasDraftCache) {
-    entry.draftMeaning = entry.meaning;
-    entry.hasDraftCache = true;
-  }
-
-  entry.isEditing = true;
-  renderEntryRow(entryId);
+  group.isEditing = false;
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: word });
 }
 
-function closeMeaningEditor(entryId) {
-  const entry = entriesById.get(entryId);
-  if (!entry) {
-    return;
-  }
-
-  entry.isEditing = false;
-  renderEntryRow(entryId);
-}
-
-async function putDictionaryRecord(entry) {
+async function putDictionaryRecord(record) {
   const currentHeartsClient = getHeartsTableClient();
   if (!isDictionaryConfigured || !currentHeartsClient) {
     throw new Error("Dictionary persistence is not configured.");
@@ -1107,190 +993,169 @@ async function putDictionaryRecord(entry) {
   await currentHeartsClient
     .put({
       TableName: awsConfig.heartsTableName,
-      Item: buildDictionaryTableItem(entry)
+      Item: buildDictionaryTableItem(record)
     })
     .promise();
 }
 
-async function createEditedEntry(sourceEntry, newMeaning, userOverride = "", heartedOverride = true) {
-  const rowId = createRowId();
-  const now = Date.now();
-  const resolvedUser = trimOrEmpty(userOverride) || sourceEntry.user || (await getIdentityId());
+async function ensureEditableCurrentUserRecord(group) {
+  const identityId = await ensureCurrentUserIdentity();
+  if (group.currentUserRecord) {
+    group.currentUserRecord.user = identityId;
+    return {
+      record: group.currentUserRecord,
+      created: false
+    };
+  }
 
-  const entry = {
+  const now = Date.now();
+  const rowId = buildCanonicalRecordRowId(identityId, group.word);
+  const record = {
     id: buildEntryId(rowId, now),
     rowId,
     timestamp: now,
     updatedTimestamp: now,
     unheartedTimestamp: null,
-    user: resolvedUser,
-    word: sourceEntry.word,
-    pronunciation: sourceEntry.pronunciation,
-    meaning: newMeaning,
-    hearted: Boolean(heartedOverride),
-    draftMeaning: newMeaning,
-    hasDraftCache: true,
-    isEditing: false,
-    saveStatus: "idle",
+    user: identityId,
+    word: group.word,
+    pronunciation: group.pronunciation,
+    meaning: null,
+    hearted: false,
     copyFlash: false
   };
 
-  await putDictionaryRecord(entry);
-  return entry;
-}
-
-async function handleToggleHeart(entryId) {
-  const entry = entriesById.get(entryId);
-  const group = entry ? getGroupByWord(entry.word) : null;
-  const targetEntries =
-    group && Array.isArray(group.currentUserHeartedEntries)
-      ? group.currentUserHeartedEntries
-          .map((groupEntry) => entriesById.get(groupEntry.id))
-          .filter((groupEntry) => Boolean(groupEntry))
-      : [];
-  const visibleEntries = group ? getVisibleEntriesForGroup(group) : [];
-
-  if (!entry || !isDictionaryConfigured || !group || targetEntries.length === 0) {
-    return;
-  }
-
-  const previousSnapshots = targetEntries.map((targetEntry) => ({
-    id: targetEntry.id,
-    user: targetEntry.user,
-    hearted: targetEntry.hearted,
-    updatedTimestamp: targetEntry.updatedTimestamp,
-    unheartedTimestamp: targetEntry.unheartedTimestamp,
-    saveStatus: targetEntry.saveStatus
-  }));
-  const previousVisibleStatuses = visibleEntries.map((visibleEntry) => ({
-    id: visibleEntry.id,
-    saveStatus: visibleEntry.saveStatus
-  }));
-
-  for (const visibleEntry of visibleEntries) {
-    visibleEntry.saveStatus = "saving-heart";
-    renderEntryRow(visibleEntry.id);
-  }
-
-  try {
-    const identityId = await ensureCurrentUserIdentity();
-    const now = Date.now();
-
-    for (const targetEntry of targetEntries) {
-      targetEntry.user = targetEntry.user || identityId;
-      targetEntry.hearted = false;
-      targetEntry.updatedTimestamp = now;
-      targetEntry.unheartedTimestamp = now;
-      await putDictionaryRecord(targetEntry);
-    }
-
-    for (const targetEntry of targetEntries) {
-      clearCopyFeedback(targetEntry.id);
-      entriesById.delete(targetEntry.id);
-    }
-
-    for (const visibleEntry of visibleEntries) {
-      const currentEntry = entriesById.get(visibleEntry.id);
-      if (!currentEntry) {
-        continue;
-      }
-
-      currentEntry.saveStatus = "idle";
-    }
-
-    const previousCount = renderedGroupCount;
-    rebuildGroupsFromEntries();
-    refreshDictionaryView({ preserveCount: previousCount });
-  } catch (error) {
-    for (const snapshot of previousSnapshots) {
-      const targetEntry = entriesById.get(snapshot.id);
-      if (!targetEntry) {
-        continue;
-      }
-
-      targetEntry.user = snapshot.user;
-      targetEntry.hearted = snapshot.hearted;
-      targetEntry.updatedTimestamp = snapshot.updatedTimestamp;
-      targetEntry.unheartedTimestamp = snapshot.unheartedTimestamp;
-      targetEntry.saveStatus = snapshot.saveStatus;
-    }
-
-    for (const snapshot of previousVisibleStatuses) {
-      const visibleEntry = entriesById.get(snapshot.id);
-      if (!visibleEntry) {
-        continue;
-      }
-
-      visibleEntry.saveStatus = snapshot.saveStatus;
-      renderEntryRow(visibleEntry.id);
-    }
-
-    console.error("Failed to soft-delete current user hearted entries for word.", error);
-  }
-}
-
-async function handleSaveMeaning(entryId) {
-  const entry = entriesById.get(entryId);
-  if (!entry || !isDictionaryConfigured) {
-    return;
-  }
-
-  const trimmedMeaning = trimOrEmpty(entry.draftMeaning);
-  if (!trimmedMeaning) {
-    closeMeaningEditor(entryId);
-    return;
-  }
-
-  const isSameUserVisibleEntry = matchesCurrentUserEntry(entry);
-  const previousSnapshot = {
-    meaning: entry.meaning,
-    user: entry.user,
-    updatedTimestamp: entry.updatedTimestamp,
-    unheartedTimestamp: entry.unheartedTimestamp,
-    hearted: entry.hearted,
-    draftMeaning: entry.draftMeaning,
-    hasDraftCache: entry.hasDraftCache,
-    isEditing: entry.isEditing,
-    saveStatus: entry.saveStatus
+  recordsById.set(record.id, record);
+  return {
+    record,
+    created: true
   };
+}
 
-  entry.isEditing = false;
-  entry.saveStatus = "saving-meaning";
-  renderEntryRow(entryId);
+async function handleToggleHeart(word) {
+  const group = getGroupByWord(word);
+  if (!group || !isDictionaryConfigured) {
+    return;
+  }
+
+  const previousCount = renderedGroupCount;
+  const previousSaveStatus = group.saveStatus;
+  group.saveStatus = "saving-heart";
+  refreshDictionaryView({ preserveCount: previousCount, preferredWord: word });
+
+  let createdRecordId = "";
+  let snapshot = null;
 
   try {
-    const identityId = await ensureCurrentUserIdentity();
-    const previousCount = renderedGroupCount;
-    let preferredEntryId = entry.id;
+    const ensured = await ensureEditableCurrentUserRecord(group);
+    const record = ensured.record;
+    createdRecordId = ensured.created ? record.id : "";
+    snapshot = {
+      hearted: record.hearted,
+      updatedTimestamp: record.updatedTimestamp,
+      unheartedTimestamp: record.unheartedTimestamp,
+      user: record.user
+    };
 
-    if (isSameUserVisibleEntry) {
-      entry.user = identityId;
-      entry.meaning = trimmedMeaning;
-      entry.updatedTimestamp = Date.now();
-      entry.draftMeaning = trimmedMeaning;
-      entry.hasDraftCache = true;
-      entry.isEditing = false;
-      entry.saveStatus = "idle";
-      await putDictionaryRecord(entry);
-    } else {
-      await createEditedEntry(entry, trimmedMeaning, identityId, false);
-      entry.saveStatus = "idle";
-      entry.isEditing = false;
-    }
+    const now = Date.now();
+    record.user = currentUserId;
+    record.hearted = !group.hasCurrentUserHeart;
+    record.updatedTimestamp = now;
+    record.unheartedTimestamp = record.hearted ? null : now;
+
+    await putDictionaryRecord(record);
 
     rebuildGroupsFromEntries();
-    refreshDictionaryView({ preserveCount: previousCount, preferredEntryId });
+    const nextGroup = getGroupByWord(word);
+    if (nextGroup) {
+      nextGroup.saveStatus = "idle";
+    }
+    refreshDictionaryView({ preserveCount: previousCount, preferredWord: word });
   } catch (error) {
-    entry.meaning = previousSnapshot.meaning;
-    entry.user = previousSnapshot.user;
-    entry.updatedTimestamp = previousSnapshot.updatedTimestamp;
-    entry.unheartedTimestamp = previousSnapshot.unheartedTimestamp;
-    entry.hearted = previousSnapshot.hearted;
-    entry.draftMeaning = previousSnapshot.draftMeaning;
-    entry.hasDraftCache = previousSnapshot.hasDraftCache;
-    entry.isEditing = previousSnapshot.isEditing;
-    entry.saveStatus = previousSnapshot.saveStatus;
-    renderEntryRow(entryId);
+    if (createdRecordId) {
+      clearCopyFeedback(createdRecordId);
+      recordsById.delete(createdRecordId);
+    } else if (snapshot) {
+      const record = group.currentUserRecord;
+      if (record) {
+        record.hearted = snapshot.hearted;
+        record.updatedTimestamp = snapshot.updatedTimestamp;
+        record.unheartedTimestamp = snapshot.unheartedTimestamp;
+        record.user = snapshot.user;
+      }
+    }
+
+    group.saveStatus = previousSaveStatus;
+    refreshDictionaryView({ preserveCount: previousCount, preferredWord: word });
+    console.error("Failed to toggle dictionary heart.", error);
+  }
+}
+
+async function handleSaveMeaning(word) {
+  const group = getGroupByWord(word);
+  if (!group || !isDictionaryConfigured) {
+    return;
+  }
+
+  const trimmedMeaning = trimOrEmpty(group.draftMeaning);
+  if (!trimmedMeaning) {
+    closeMeaningEditor(word);
+    return;
+  }
+
+  const previousCount = renderedGroupCount;
+  const previousSaveStatus = group.saveStatus;
+  group.saveStatus = "saving-meaning";
+  group.isEditing = false;
+  refreshDictionaryView({ preserveCount: previousCount, preferredWord: word });
+
+  let createdRecordId = "";
+  let snapshot = null;
+
+  try {
+    const ensured = await ensureEditableCurrentUserRecord(group);
+    const record = ensured.record;
+    createdRecordId = ensured.created ? record.id : "";
+    snapshot = {
+      meaning: record.meaning,
+      updatedTimestamp: record.updatedTimestamp,
+      user: record.user,
+      hearted: record.hearted,
+      unheartedTimestamp: record.unheartedTimestamp
+    };
+
+    record.user = currentUserId;
+    record.meaning = trimmedMeaning;
+    record.updatedTimestamp = Date.now();
+
+    await putDictionaryRecord(record);
+
+    rebuildGroupsFromEntries();
+    const nextGroup = getGroupByWord(word);
+    if (nextGroup) {
+      nextGroup.draftMeaning = trimmedMeaning;
+      nextGroup.hasDraftCache = true;
+      nextGroup.isEditing = false;
+      nextGroup.saveStatus = "idle";
+    }
+    refreshDictionaryView({ preserveCount: previousCount, preferredWord: word });
+  } catch (error) {
+    if (createdRecordId) {
+      clearCopyFeedback(createdRecordId);
+      recordsById.delete(createdRecordId);
+    } else if (snapshot) {
+      const record = group.currentUserRecord;
+      if (record) {
+        record.meaning = snapshot.meaning;
+        record.updatedTimestamp = snapshot.updatedTimestamp;
+        record.user = snapshot.user;
+        record.hearted = snapshot.hearted;
+        record.unheartedTimestamp = snapshot.unheartedTimestamp;
+      }
+    }
+
+    group.saveStatus = previousSaveStatus;
+    group.isEditing = true;
+    refreshDictionaryView({ preserveCount: previousCount, preferredWord: word });
     console.error("Failed to save dictionary meaning.", error);
   }
 }
@@ -1301,18 +1166,18 @@ function handleMeaningInput(event) {
     return;
   }
 
-  const row = input.closest(".dictionary-entry");
-  if (!row) {
+  const card = input.closest(".dictionary-card");
+  if (!card) {
     return;
   }
 
-  const entry = entriesById.get(row.dataset.entryId);
-  if (!entry) {
+  const group = getGroupByWord(card.dataset.word || "");
+  if (!group) {
     return;
   }
 
-  entry.draftMeaning = input.value;
-  entry.hasDraftCache = true;
+  group.draftMeaning = input.value;
+  group.hasDraftCache = true;
 }
 
 function handleMeaningInputKeydown(event) {
@@ -1321,25 +1186,25 @@ function handleMeaningInputKeydown(event) {
     return;
   }
 
-  const row = input.closest(".dictionary-entry");
-  if (!row) {
+  const card = input.closest(".dictionary-card");
+  if (!card) {
     return;
   }
 
-  const entryId = row.dataset.entryId;
-  if (!entryId) {
+  const word = trimOrEmpty(card.dataset.word);
+  if (!word) {
     return;
   }
 
   if (event.key === "Enter") {
     event.preventDefault();
-    void handleSaveMeaning(entryId);
+    void handleSaveMeaning(word);
     return;
   }
 
   if (event.key === "Escape") {
     event.preventDefault();
-    closeMeaningEditor(entryId);
+    closeMeaningEditor(word);
   }
 }
 
@@ -1360,56 +1225,70 @@ async function handleDictionaryListClick(event) {
     return;
   }
 
-  const entryId = row.dataset.entryId;
-  if (!entryId || !entriesById.has(entryId)) {
+  const card = row.closest(".dictionary-card");
+  const word = trimOrEmpty((card && card.dataset.word) || row.dataset.word);
+  if (!word) {
     return;
   }
-
-  setSelectedEntry(entryId);
 
   if (!actionButton) {
+    selectedWord = word;
+    refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: word });
     return;
   }
 
-  const action = actionButton.dataset.action;
+  if (actionButton.dataset.action !== "copy-word" && actionButton.dataset.action !== "play-pronunciation") {
+    selectedWord = word;
+  }
 
-  if (action === "toggle-heart") {
-    await handleToggleHeart(entryId);
+  const recordId = trimOrEmpty(row.dataset.recordId);
+  const record = recordId ? recordsById.get(recordId) : null;
+
+  if (actionButton.dataset.action === "toggle-heart") {
+    await handleToggleHeart(word);
     return;
   }
 
-  if (action === "copy-word") {
+  if (actionButton.dataset.action === "copy-word") {
+    if (!record) {
+      return;
+    }
+
     try {
-      const entry = entriesById.get(entryId);
-      if (!entry) {
+      const group = getGroupByWord(word);
+      if (!group) {
         return;
       }
 
-      await copyTextToClipboard(buildCopyPayload(entry));
-      showCopySuccess(entryId);
+      await copyTextToClipboard(getGroupCopyPayload(group, record));
+      showCopySuccess(record.id);
     } catch (error) {
       console.error("Copy failed.", error);
     }
     return;
   }
 
-  if (action === "play-pronunciation") {
-    await playPronunciation(entryId);
+  if (actionButton.dataset.action === "play-pronunciation") {
+    if (!record) {
+      return;
+    }
+
+    await playPronunciation(record.id);
     return;
   }
 
-  if (action === "open-meaning-editor") {
-    openMeaningEditor(entryId);
+  if (actionButton.dataset.action === "open-meaning-editor") {
+    openMeaningEditor(word);
     return;
   }
 
-  if (action === "save-meaning") {
-    await handleSaveMeaning(entryId);
+  if (actionButton.dataset.action === "save-meaning") {
+    await handleSaveMeaning(word);
     return;
   }
 
-  if (action === "cancel-meaning") {
-    closeMeaningEditor(entryId);
+  if (actionButton.dataset.action === "cancel-meaning") {
+    closeMeaningEditor(word);
   }
 }
 
@@ -1425,12 +1304,12 @@ function handleFilterClick(event) {
   }
 
   activeFilter = nextFilter;
-  refreshDictionaryView();
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
 }
 
 function handleMyHeartsToggleClick() {
   showOnlyMyHearts = !showOnlyMyHearts;
-  refreshDictionaryView();
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
 }
 
 async function loadDictionary() {
@@ -1457,16 +1336,16 @@ async function loadDictionary() {
 
   try {
     await ensureCurrentUserIdentity();
-    const rawItems = await scanHeartedEntries();
+    const rawItems = await scanDictionaryEntries();
 
-    entriesById.clear();
+    recordsById.clear();
     for (const rawItem of rawItems) {
-      const entry = normalizeDictionaryEntry(rawItem);
-      if (!entry) {
+      const record = normalizeDictionaryEntry(rawItem);
+      if (!record) {
         continue;
       }
 
-      entriesById.set(entry.id, entry);
+      recordsById.set(record.id, record);
     }
 
     rebuildGroupsFromEntries();
@@ -1481,8 +1360,14 @@ async function loadDictionary() {
 
 updateFilterControls();
 
-sharedAudio.addEventListener("ended", () => clearPlayState());
-sharedAudio.addEventListener("error", () => clearPlayState());
+sharedAudio.addEventListener("ended", () => {
+  playingRecordId = "";
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
+});
+sharedAudio.addEventListener("error", () => {
+  playingRecordId = "";
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
+});
 
 if (dictionaryFilters) {
   dictionaryFilters.addEventListener("click", handleFilterClick);
@@ -1511,18 +1396,20 @@ document.addEventListener("click", (event) => {
     return;
   }
 
-  clearSelection();
+  selectedWord = "";
+  refreshDictionaryView({ preserveCount: renderedGroupCount });
 });
 
 window.addEventListener("beforeunload", () => {
-  stopAudio();
+  sharedAudio.pause();
+  sharedAudio.currentTime = 0;
 
   for (const url of audioCache.values()) {
     URL.revokeObjectURL(url);
   }
 
-  for (const entryId of copyFeedbackTimers.keys()) {
-    clearCopyFeedback(entryId);
+  for (const recordId of copyFeedbackTimers.keys()) {
+    clearCopyFeedback(recordId);
   }
 });
 

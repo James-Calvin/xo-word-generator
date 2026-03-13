@@ -31,8 +31,14 @@ const MAX_RESULTS = 50;
 const RETRY_LIMIT = 100;
 const COPY_FEEDBACK_MS = 1200;
 const LOCAL_STORAGE_ROWS_KEY = "xo.generated-rows.v1";
-const LOCAL_STORAGE_ROWS_VERSION = 1;
+const LOCAL_STORAGE_ROWS_VERSION = 2;
 const PERSIST_SAVE_DEBOUNCE_MS = 250;
+
+const DISPLAY_MEANING_SOURCES = {
+  NONE: "",
+  OWN: "own",
+  IMPORTED: "imported"
+};
 
 const SLOT_TYPES = {
   CONSONANT: "C",
@@ -126,6 +132,99 @@ const buildCopyPayload =
         const base = `${normalizedWord} /${normalizedPronunciation}/`;
         return normalizedMeaning ? `${base} : ${normalizedMeaning}` : base;
       };
+
+function getActivityTimestamp(item) {
+  return Math.max(toEpochMs(item && item.updatedTimestamp), toEpochMs(item && item.timestamp));
+}
+
+function buildCanonicalRecordRowId(userId, word) {
+  return `${encodeURIComponent(trimOrEmpty(userId))}::${encodeURIComponent(trimOrEmpty(word))}`;
+}
+
+function hasOwnMeaning(state) {
+  return hasMeaningText(state && state.ownMeaning);
+}
+
+function getDraftMeaningTimestamp(state) {
+  if (!state || !state.hasDraftCache || !hasMeaningText(state.draftMeaning)) {
+    return 0;
+  }
+
+  return toEpochMs(state.draftUpdatedTimestamp);
+}
+
+function getLocalUserStateTimestamp(state) {
+  if (
+    !state ||
+    (!state.hasPersistedRecord &&
+      !state.hearted &&
+      !hasOwnMeaning(state) &&
+      !hasMeaningText(state.draftMeaning))
+  ) {
+    return 0;
+  }
+
+  return Math.max(getActivityTimestamp(state), getDraftMeaningTimestamp(state));
+}
+
+function getPreferredOwnMeaning(state) {
+  const draftTimestamp = getDraftMeaningTimestamp(state);
+  if (draftTimestamp > getActivityTimestamp(state) && hasMeaningText(state.draftMeaning)) {
+    return trimOrEmpty(state.draftMeaning);
+  }
+
+  return hasOwnMeaning(state) ? trimOrEmpty(state.ownMeaning) : "";
+}
+
+function getDisplayedMeaning(state) {
+  return state && hasMeaningText(state.displayMeaning) ? trimOrEmpty(state.displayMeaning) : "";
+}
+
+function isImportedDisplayMeaning(state) {
+  return Boolean(state) && state.displayMeaningSource === DISPLAY_MEANING_SOURCES.IMPORTED;
+}
+
+function clearImportedDisplay(state) {
+  state.importedSourceRowId = "";
+  state.importedSourceTimestamp = null;
+}
+
+function syncDisplayMeaning(state, importedMatch = null) {
+  if (!state) {
+    return;
+  }
+
+  const localMeaning = getPreferredOwnMeaning(state);
+  const importedMeaning = importedMatch && hasMeaningText(importedMatch.meaning)
+    ? trimOrEmpty(importedMatch.meaning)
+    : "";
+
+  if (localMeaning) {
+    state.displayMeaning = localMeaning;
+    state.displayMeaningSource = DISPLAY_MEANING_SOURCES.OWN;
+    clearImportedDisplay(state);
+    return;
+  }
+
+  if (importedMeaning) {
+    state.displayMeaning = importedMeaning;
+    state.displayMeaningSource = DISPLAY_MEANING_SOURCES.IMPORTED;
+    state.importedSourceRowId = trimOrEmpty(importedMatch.rowId);
+    state.importedSourceTimestamp = importedTimestamp;
+    return;
+  }
+
+  if (localMeaning) {
+    state.displayMeaning = localMeaning;
+    state.displayMeaningSource = DISPLAY_MEANING_SOURCES.OWN;
+    clearImportedDisplay(state);
+    return;
+  }
+
+  state.displayMeaning = null;
+  state.displayMeaningSource = DISPLAY_MEANING_SOURCES.NONE;
+  clearImportedDisplay(state);
+}
 
 function randomFrom(list) {
   return list[Math.floor(Math.random() * list.length)];
@@ -375,19 +474,22 @@ const getIdentityId =
     throw new Error("AWS runtime is unavailable.");
   });
 
-function sortMatchesByTimestampDesc(items) {
-  return [...items].sort((a, b) => toEpochMs(b.timestamp) - toEpochMs(a.timestamp));
+function sortMatchesByActivityDesc(items) {
+  return [...items].sort((a, b) => getActivityTimestamp(b) - getActivityTimestamp(a));
 }
 
 function findNewestNonEmptyMeaningMatch(items) {
-  const sorted = sortMatchesByTimestampDesc(items);
+  const sorted = sortMatchesByActivityDesc(items);
   return sorted.find((item) => hasMeaningText(item.meaning)) || null;
 }
 
 function logMeaningMatchesFromFullRead(word, matches) {
-  const flattened = sortMatchesByTimestampDesc(matches).map((item) => ({
+  const flattened = sortMatchesByActivityDesc(matches).map((item) => ({
     rowId: item.rowId,
     timestamp: item.timestamp,
+    updatedTimestamp: item.updatedTimestamp ?? null,
+    user: item.user ?? null,
+    hearted: item.hearted ?? null,
     meaning: item.meaning ?? null
   }));
 
@@ -448,13 +550,21 @@ async function scanWordMatches(word) {
         TableName: awsConfig.heartsTableName,
         FilterExpression: "#word = :word",
         ExpressionAttributeNames: {
+          "#rowId": "rowId",
           "#word": "word",
-          "#timestamp": "timestamp"
+          "#pronunciation": "pronunciation",
+          "#meaning": "meaning",
+          "#hearted": "hearted",
+          "#timestamp": "timestamp",
+          "#updatedTimestamp": "updatedTimestamp",
+          "#user": "user",
+          "#unheartedTimestamp": "unheartedTimestamp"
         },
         ExpressionAttributeValues: {
           ":word": word
         },
-        ProjectionExpression: "rowId, #word, #timestamp, meaning",
+        ProjectionExpression:
+          "#rowId, #word, #pronunciation, #meaning, #hearted, #timestamp, #updatedTimestamp, #user, #unheartedTimestamp",
         ExclusiveStartKey: lastEvaluatedKey
       })
       .promise();
@@ -469,7 +579,17 @@ async function scanWordMatches(word) {
   return matches;
 }
 
-async function lookupLatestDefinitionForWord(word) {
+function findNewestCurrentUserMatch(items, currentUserId) {
+  if (!currentUserId) {
+    return null;
+  }
+
+  return (
+    sortMatchesByActivityDesc(items).find((item) => trimOrEmpty(item.user) === trimOrEmpty(currentUserId)) || null
+  );
+}
+
+async function lookupWordState(word) {
   if (!isHeartsConfigured) {
     return null;
   }
@@ -479,25 +599,44 @@ async function lookupLatestDefinitionForWord(word) {
     return null;
   }
 
+  const currentUserId = trimOrEmpty(await getIdentityId());
+
   try {
     const indexedMatches = await queryWordMatchesByIndex(word);
-    const indexedMatch = findNewestNonEmptyMeaningMatch(indexedMatches);
     const missingMeaningProjection =
       indexedMatches.length > 0 &&
-      indexedMatches.some((item) => !Object.prototype.hasOwnProperty.call(item, "meaning"));
+      indexedMatches.some(
+        (item) =>
+          !Object.prototype.hasOwnProperty.call(item, "meaning") ||
+          !Object.prototype.hasOwnProperty.call(item, "user") ||
+          !Object.prototype.hasOwnProperty.call(item, "hearted") ||
+          !Object.prototype.hasOwnProperty.call(item, "updatedTimestamp")
+      );
 
     if (missingMeaningProjection) {
       const fallbackMatches = await scanWordMatches(word);
       logMeaningMatchesFromFullRead(word, fallbackMatches);
       return {
-        match: findNewestNonEmptyMeaningMatch(fallbackMatches),
+        currentUserId,
+        currentUserMatch: findNewestCurrentUserMatch(fallbackMatches, currentUserId),
+        latestMeaningMatch: findNewestNonEmptyMeaningMatch(fallbackMatches),
+        latestImportedMeaningMatch:
+          sortMatchesByActivityDesc(fallbackMatches).find(
+            (item) => trimOrEmpty(item.user) !== currentUserId && hasMeaningText(item.meaning)
+          ) || null,
         usedFullRead: true,
         matches: fallbackMatches
       };
     }
 
     return {
-      match: indexedMatch,
+      currentUserId,
+      currentUserMatch: findNewestCurrentUserMatch(indexedMatches, currentUserId),
+      latestMeaningMatch: findNewestNonEmptyMeaningMatch(indexedMatches),
+      latestImportedMeaningMatch:
+        sortMatchesByActivityDesc(indexedMatches).find(
+          (item) => trimOrEmpty(item.user) !== currentUserId && hasMeaningText(item.meaning)
+        ) || null,
       usedFullRead: false,
       matches: indexedMatches
     };
@@ -507,7 +646,13 @@ async function lookupLatestDefinitionForWord(word) {
     logMeaningMatchesFromFullRead(word, fallbackMatches);
 
     return {
-      match: findNewestNonEmptyMeaningMatch(fallbackMatches),
+      currentUserId,
+      currentUserMatch: findNewestCurrentUserMatch(fallbackMatches, currentUserId),
+      latestMeaningMatch: findNewestNonEmptyMeaningMatch(fallbackMatches),
+      latestImportedMeaningMatch:
+        sortMatchesByActivityDesc(fallbackMatches).find(
+          (item) => trimOrEmpty(item.user) !== currentUserId && hasMeaningText(item.meaning)
+        ) || null,
       usedFullRead: true,
       matches: fallbackMatches,
       queryError
@@ -563,18 +708,21 @@ async function synthesize(word, ipa) {
   return objectUrl;
 }
 
-async function createHeartRecord(state) {
+async function putCurrentUserRecord(state) {
   const currentHeartsTableClient = getHeartsTableClient();
   if (!isHeartsConfigured || !currentHeartsTableClient) {
     throw new Error("Hearts persistence is not configured.");
   }
 
   const now = Date.now();
-  state.timestamp = now;
-  state.user = state.user || (await getIdentityId());
+  const identityId = trimOrEmpty(state.user) || trimOrEmpty(await getIdentityId());
+  const hasCanonicalRecord = Boolean(state.hasPersistedRecord && trimOrEmpty(state.recordRowId));
+  state.user = identityId;
+  state.recordRowId = trimOrEmpty(state.recordRowId) || buildCanonicalRecordRowId(identityId, state.word);
+  if (!hasCanonicalRecord) {
+    state.timestamp = now;
+  }
   state.updatedTimestamp = now;
-  state.unheartedTimestamp = null;
-  state.hearted = true;
 
   await currentHeartsTableClient
     .put({
@@ -586,54 +734,20 @@ async function createHeartRecord(state) {
   state.hasPersistedRecord = true;
 }
 
-async function updateHeartRecord(state, hearted) {
-  const currentHeartsTableClient = getHeartsTableClient();
-  if (!isHeartsConfigured || !currentHeartsTableClient) {
-    throw new Error("Hearts persistence is not configured.");
-  }
-
-  const now = Date.now();
-  const unheartedTimestamp = hearted ? null : now;
-  state.user = state.user || (await getIdentityId());
-  state.hearted = hearted;
-  state.updatedTimestamp = now;
-  state.unheartedTimestamp = unheartedTimestamp;
-
-  await currentHeartsTableClient
-    .put({
-      TableName: awsConfig.heartsTableName,
-      Item: buildHeartTableItem(state)
-    })
-    .promise();
-}
-
-async function updateMeaningRecord(state, meaning) {
-  const currentHeartsTableClient = getHeartsTableClient();
-  if (!isHeartsConfigured || !currentHeartsTableClient) {
-    throw new Error("Hearts persistence is not configured.");
-  }
-
-  state.user = state.user || (await getIdentityId());
-  state.meaning = meaning;
-  state.updatedTimestamp = Date.now();
-
-  await currentHeartsTableClient
-    .put({
-      TableName: awsConfig.heartsTableName,
-      Item: buildHeartTableItem(state)
-    })
-    .promise();
-}
-
 async function persistHeartedState(state, hearted) {
-  if (!state.hasPersistedRecord) {
-    if (hearted) {
-      await createHeartRecord(state);
-    }
+  const now = Date.now();
+  state.hearted = hearted;
+  state.unheartedTimestamp = hearted ? null : now;
+  if (!hearted && !state.hasPersistedRecord) {
     return;
   }
 
-  await updateHeartRecord(state, hearted);
+  await putCurrentUserRecord(state);
+}
+
+async function persistOwnMeaning(state, meaning) {
+  state.ownMeaning = meaning;
+  await putCurrentUserRecord(state);
 }
 
 function clearSelection() {
@@ -648,12 +762,12 @@ function clearSelection() {
 
 function buildHeartTableItem(state) {
   return {
-    rowId: state.rowId,
+    rowId: state.recordRowId || state.rowId,
     timestamp: state.timestamp,
     user: state.user || null,
     word: state.word,
     pronunciation: state.ipa,
-    meaning: state.meaning || null,
+    meaning: state.ownMeaning || null,
     hearted: Boolean(state.hearted),
     updatedTimestamp: state.updatedTimestamp,
     unheartedTimestamp: state.unheartedTimestamp ?? null
@@ -698,6 +812,7 @@ function clearPlayState() {
 function createRowState(generated) {
   return {
     rowId: generated.rowId,
+    recordRowId: "",
     timestamp: generated.timestamp,
     updatedTimestamp: generated.timestamp,
     unheartedTimestamp: null,
@@ -705,14 +820,16 @@ function createRowState(generated) {
     word: generated.word,
     ipa: generated.ipa,
     hearted: false,
-    meaning: null,
+    ownMeaning: null,
+    displayMeaning: null,
+    displayMeaningSource: DISPLAY_MEANING_SOURCES.NONE,
     draftMeaning: "",
+    draftUpdatedTimestamp: null,
     hasDraftCache: false,
     isEditing: false,
     saveStatus: "idle",
     copyFlash: false,
     hasPersistedRecord: false,
-    hasImportedMeaning: false,
     importedSourceRowId: "",
     importedSourceTimestamp: null
   };
@@ -757,11 +874,14 @@ function serializeRowState(state) {
     : normalizedTimestamp;
   const importedTimestamp = Number(state.importedSourceTimestamp);
   const unheartedTimestamp = Number(state.unheartedTimestamp);
-  const meaning = trimOrEmpty(state.meaning);
+  const ownMeaning = trimOrEmpty(state.ownMeaning);
+  const displayMeaning = trimOrEmpty(state.displayMeaning);
   const draftMeaning = typeof state.draftMeaning === "string" ? state.draftMeaning : "";
+  const draftUpdatedTimestamp = Number(state.draftUpdatedTimestamp);
 
   return {
     rowId: state.rowId,
+    recordRowId: trimOrEmpty(state.recordRowId),
     timestamp: normalizedTimestamp,
     updatedTimestamp: normalizedUpdatedTimestamp,
     unheartedTimestamp:
@@ -774,11 +894,13 @@ function serializeRowState(state) {
     word: state.word,
     ipa: state.ipa,
     hearted: Boolean(state.hearted),
-    meaning: meaning || null,
+    ownMeaning: ownMeaning || null,
+    displayMeaning: displayMeaning || null,
+    displayMeaningSource: trimOrEmpty(state.displayMeaningSource),
     draftMeaning,
+    draftUpdatedTimestamp: Number.isFinite(draftUpdatedTimestamp) ? draftUpdatedTimestamp : null,
     hasDraftCache: Boolean(state.hasDraftCache),
     hasPersistedRecord: Boolean(state.hasPersistedRecord),
-    hasImportedMeaning: Boolean(state.hasImportedMeaning),
     importedSourceRowId: trimOrEmpty(state.importedSourceRowId),
     importedSourceTimestamp: Number.isFinite(importedTimestamp) ? importedTimestamp : null
   };
@@ -810,9 +932,16 @@ function deserializeRowState(rawState) {
         ? rawUnheartedTimestamp
         : null;
 
-  const meaning = hasMeaningText(rawState.meaning) ? trimOrEmpty(rawState.meaning) : null;
+  const ownMeaning = hasMeaningText(rawState.ownMeaning) ? trimOrEmpty(rawState.ownMeaning) : null;
+  const displayMeaning = hasMeaningText(rawState.displayMeaning)
+    ? trimOrEmpty(rawState.displayMeaning)
+    : ownMeaning;
+  const displayMeaningSource = trimOrEmpty(rawState.displayMeaningSource);
   const draftMeaning = typeof rawState.draftMeaning === "string" ? rawState.draftMeaning : "";
-  const hasImportedMeaning = Boolean(rawState.hasImportedMeaning) && Boolean(meaning);
+  const rawDraftUpdatedTimestamp = Number(rawState.draftUpdatedTimestamp);
+  const draftUpdatedTimestamp = Number.isFinite(rawDraftUpdatedTimestamp)
+    ? rawDraftUpdatedTimestamp
+    : null;
 
   const rawImportedSourceTimestamp = Number(rawState.importedSourceTimestamp);
   const importedSourceTimestamp = Number.isFinite(rawImportedSourceTimestamp)
@@ -821,6 +950,7 @@ function deserializeRowState(rawState) {
 
   return {
     rowId,
+    recordRowId: trimOrEmpty(rawState.recordRowId),
     timestamp,
     updatedTimestamp,
     unheartedTimestamp,
@@ -828,16 +958,24 @@ function deserializeRowState(rawState) {
     word,
     ipa,
     hearted: Boolean(rawState.hearted),
-    meaning,
+    ownMeaning,
+    displayMeaning,
+    displayMeaningSource:
+      displayMeaningSource === DISPLAY_MEANING_SOURCES.IMPORTED
+        ? DISPLAY_MEANING_SOURCES.IMPORTED
+        : displayMeaning
+          ? DISPLAY_MEANING_SOURCES.OWN
+          : DISPLAY_MEANING_SOURCES.NONE,
     draftMeaning,
+    draftUpdatedTimestamp,
     hasDraftCache: Boolean(rawState.hasDraftCache) || draftMeaning.length > 0,
     isEditing: false,
     saveStatus: "idle",
     copyFlash: false,
     hasPersistedRecord: Boolean(rawState.hasPersistedRecord),
-    hasImportedMeaning,
     importedSourceRowId: trimOrEmpty(rawState.importedSourceRowId),
-    importedSourceTimestamp: hasImportedMeaning ? importedSourceTimestamp : null
+    importedSourceTimestamp:
+      displayMeaningSource === DISPLAY_MEANING_SOURCES.IMPORTED ? importedSourceTimestamp : null
   };
 }
 
@@ -964,6 +1102,7 @@ function restorePersistedRows() {
       continue;
     }
 
+    syncDisplayMeaning(state);
     const row = createResultRow(state);
     rowStateById.set(state.rowId, state);
     generatedWords.add(state.word);
@@ -1050,7 +1189,37 @@ function createResultRow(state) {
   return item;
 }
 
-async function hydrateImportedDefinition(rowId) {
+function applyCurrentUserMatchToState(state, match) {
+  if (!state || !match) {
+    return;
+  }
+
+  state.user = trimOrEmpty(match.user) || state.user;
+  state.recordRowId = trimOrEmpty(match.rowId) || state.recordRowId;
+  state.hasPersistedRecord = true;
+  state.timestamp = toEpochMs(match.timestamp) || state.timestamp;
+  state.ipa = trimOrEmpty(match.pronunciation || match.ipa) || state.ipa;
+
+  if (state.saveStatus !== "idle") {
+    return;
+  }
+
+  if (getLocalUserStateTimestamp(state) > getActivityTimestamp(match)) {
+    return;
+  }
+
+  state.updatedTimestamp = toEpochMs(match.updatedTimestamp) || toEpochMs(match.timestamp) || state.updatedTimestamp;
+  state.unheartedTimestamp = toEpochMs(match.unheartedTimestamp) || null;
+  state.hearted = Boolean(match.hearted);
+  state.ownMeaning = hasMeaningText(match.meaning) ? trimOrEmpty(match.meaning) : null;
+  if (!state.isEditing && getDraftMeaningTimestamp(state) <= getActivityTimestamp(match)) {
+    state.draftMeaning = state.ownMeaning || "";
+    state.draftUpdatedTimestamp = null;
+    state.hasDraftCache = hasMeaningText(state.draftMeaning);
+  }
+}
+
+async function hydrateWordState(rowId) {
   if (!isHeartsConfigured) {
     return;
   }
@@ -1061,8 +1230,8 @@ async function hydrateImportedDefinition(rowId) {
   }
 
   try {
-    const lookup = await lookupLatestDefinitionForWord(initialState.word);
-    if (!lookup || !lookup.match || !hasMeaningText(lookup.match.meaning)) {
+    const lookup = await lookupWordState(initialState.word);
+    if (!lookup) {
       return;
     }
 
@@ -1071,27 +1240,12 @@ async function hydrateImportedDefinition(rowId) {
       return;
     }
 
-    if (
-      currentState.hasPersistedRecord ||
-      currentState.hearted ||
-      currentState.isEditing ||
-      currentState.saveStatus !== "idle" ||
-      hasMeaningText(currentState.meaning)
-    ) {
-      return;
-    }
-
-    currentState.meaning = trimOrEmpty(lookup.match.meaning);
-    currentState.hasImportedMeaning = true;
-    currentState.importedSourceRowId =
-      typeof lookup.match.rowId === "string" ? lookup.match.rowId : "";
-    currentState.importedSourceTimestamp =
-      typeof lookup.match.timestamp !== "undefined" ? lookup.match.timestamp : null;
-    currentState.hasDraftCache = false;
+    applyCurrentUserMatchToState(currentState, lookup.currentUserMatch);
+    syncDisplayMeaning(currentState, lookup.latestImportedMeaningMatch || lookup.latestMeaningMatch);
     renderRow(rowId);
     flushPersistedRowsSave();
   } catch (error) {
-    console.error("Failed to load imported definition.", error);
+    console.error("Failed to hydrate generated word state.", error);
   }
 }
 
@@ -1104,15 +1258,18 @@ function renderMeaning(row, state) {
   container.textContent = "";
   const isSelected = selectedRowId === state.rowId;
   const isSaving = state.saveStatus !== "idle";
+  const displayMeaning = getDisplayedMeaning(state);
 
-  if (state.meaning) {
+  if (displayMeaning) {
     const definition = document.createElement("span");
     definition.className = "meaning-definition";
-    definition.textContent = `— ${state.meaning}`;
+    definition.textContent = `— ${displayMeaning}`;
     container.appendChild(definition);
   }
 
-  const canEditMeaning = isHeartsConfigured && (state.hearted || state.hasImportedMeaning);
+  const canEditMeaning =
+    isHeartsConfigured &&
+    (state.hearted || hasOwnMeaning(state) || isImportedDisplayMeaning(state) || getDraftMeaningTimestamp(state) > 0);
   if (!canEditMeaning) {
     return;
   }
@@ -1159,7 +1316,7 @@ function renderMeaning(row, state) {
   link.type = "button";
   link.className = "meaning-link";
   link.dataset.action = "open-meaning-editor";
-  link.textContent = state.meaning ? "Edit" : "Add a meaning";
+  link.textContent = hasOwnMeaning(state) || hasMeaningText(state.draftMeaning) ? "Edit my meaning" : "Add my meaning";
   link.disabled = isSaving;
   container.appendChild(link);
 }
@@ -1295,19 +1452,12 @@ async function handleToggleHeart(rowId) {
   } else {
     state.hearted = true;
   }
-  const turnedOn = !previousHearted && state.hearted;
-
   state.isEditing = false;
   state.saveStatus = "saving-heart";
   renderRow(rowId);
 
   try {
     await persistHeartedState(state, state.hearted);
-    if (turnedOn && state.hasImportedMeaning) {
-      state.hasImportedMeaning = false;
-      state.importedSourceRowId = "";
-      state.importedSourceTimestamp = null;
-    }
   } catch (error) {
     state.hearted = previousHearted;
     state.isEditing = previousEditing;
@@ -1321,13 +1471,21 @@ async function handleToggleHeart(rowId) {
 
 function openMeaningEditor(rowId) {
   const state = rowStateById.get(rowId);
-  if (!state || !isHeartsConfigured || (!state.hearted && !state.hasImportedMeaning)) {
+  if (
+    !state ||
+    !isHeartsConfigured ||
+    (!state.hearted &&
+      !hasOwnMeaning(state) &&
+      !isImportedDisplayMeaning(state) &&
+      !hasMeaningText(state.draftMeaning))
+  ) {
     return;
   }
 
   if (!state.hasDraftCache) {
-    state.draftMeaning = state.meaning || "";
+    state.draftMeaning = state.ownMeaning || "";
     state.hasDraftCache = true;
+    state.draftUpdatedTimestamp = null;
   }
 
   state.isEditing = true;
@@ -1346,7 +1504,14 @@ function closeMeaningEditor(rowId) {
 
 async function handleSaveMeaning(rowId) {
   const state = rowStateById.get(rowId);
-  if (!state || !isHeartsConfigured || (!state.hearted && !state.hasImportedMeaning)) {
+  if (
+    !state ||
+    !isHeartsConfigured ||
+    (!state.hearted &&
+      !hasOwnMeaning(state) &&
+      !isImportedDisplayMeaning(state) &&
+      !hasMeaningText(state.draftMeaning))
+  ) {
     return;
   }
 
@@ -1356,47 +1521,37 @@ async function handleSaveMeaning(rowId) {
     return;
   }
 
-  const previousMeaning = state.meaning;
+  const previousOwnMeaning = state.ownMeaning;
+  const previousDisplayMeaning = state.displayMeaning;
+  const previousDisplayMeaningSource = state.displayMeaningSource;
   const previousEditing = state.isEditing;
   const previousHearted = state.hearted;
-  const previousImportedMeaning = state.hasImportedMeaning;
   const previousImportedSourceRowId = state.importedSourceRowId;
   const previousImportedSourceTimestamp = state.importedSourceTimestamp;
+  const previousUpdatedTimestamp = state.updatedTimestamp;
+  const previousDraftUpdatedTimestamp = state.draftUpdatedTimestamp;
 
-  const importedMeaningSave = state.hasImportedMeaning && !state.hasPersistedRecord;
-  state.meaning = trimmedMeaning;
+  state.ownMeaning = trimmedMeaning;
   state.draftMeaning = trimmedMeaning;
+  state.draftUpdatedTimestamp = Date.now();
   state.hasDraftCache = true;
   state.isEditing = false;
-  if (importedMeaningSave) {
-    state.hearted = true;
-  }
+  syncDisplayMeaning(state);
   state.saveStatus = "saving-meaning";
   renderRow(rowId);
 
   try {
-    let createdNewRecord = false;
-    if (!state.hasPersistedRecord) {
-      await persistHeartedState(state, true);
-      createdNewRecord = true;
-    }
-
-    if (!createdNewRecord) {
-      await updateMeaningRecord(state, trimmedMeaning);
-    }
-
-    if (importedMeaningSave) {
-      state.hasImportedMeaning = false;
-      state.importedSourceRowId = "";
-      state.importedSourceTimestamp = null;
-    }
+    await persistOwnMeaning(state, trimmedMeaning);
   } catch (error) {
-    state.meaning = previousMeaning;
+    state.ownMeaning = previousOwnMeaning;
+    state.displayMeaning = previousDisplayMeaning;
+    state.displayMeaningSource = previousDisplayMeaningSource;
     state.isEditing = previousEditing;
     state.hearted = previousHearted;
-    state.hasImportedMeaning = previousImportedMeaning;
     state.importedSourceRowId = previousImportedSourceRowId;
     state.importedSourceTimestamp = previousImportedSourceTimestamp;
+    state.updatedTimestamp = previousUpdatedTimestamp;
+    state.draftUpdatedTimestamp = previousDraftUpdatedTimestamp;
     console.error("Failed to save meaning.", error);
   } finally {
     state.saveStatus = "idle";
@@ -1423,6 +1578,7 @@ function handleMeaningInput(event) {
 
   state.draftMeaning = input.value;
   state.hasDraftCache = true;
+  state.draftUpdatedTimestamp = Date.now();
   schedulePersistedRowsSave();
 }
 
@@ -1603,7 +1759,7 @@ function addResult() {
   resultsList.prepend(row);
   generatedWords.add(generated.word);
   renderRow(state.rowId);
-  void hydrateImportedDefinition(state.rowId);
+  void hydrateWordState(state.rowId);
 
   removeOldestRowsIfNeeded();
   flushPersistedRowsSave();
@@ -1645,7 +1801,12 @@ async function handleResultListClick(event) {
       const fallbackWord = row.dataset.word || "";
       const fallbackIpa = row.dataset.ipa || "";
       const text = state
-        ? buildCopyPayload(state)
+        ? buildCopyPayload({
+            word: state.word,
+            pronunciation: state.ipa,
+            ipa: state.ipa,
+            meaning: getDisplayedMeaning(state)
+          })
         : fallbackWord && fallbackIpa
           ? `${fallbackWord} /${fallbackIpa}/`
           : fallbackWord;
