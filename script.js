@@ -1,32 +1,3 @@
-const vowels = [
-  { symbol: "a", ipa: "æ" },
-  { symbol: "ie", ipa: "i" },
-  { symbol: "ai", ipa: "eɪ" },
-  { symbol: "i", ipa: "ɪ" },
-  { symbol: "u", ipa: "ə" },
-  { symbol: "au", ipa: "a" },
-  { symbol: "o", ipa: "ō" },
-  { symbol: "oo", ipa: "u" },
-];
-
-const consonants = [
-  { symbol: "g", ipa: "g" },
-  { symbol: "b", ipa: "b" },
-  { symbol: "r", ipa: "r" },
-  { symbol: "l", ipa: "l" },
-  { symbol: "j", ipa: "d͡ʒ" },
-  { symbol: "m", ipa: "m" },
-  { symbol: "z", ipa: "z" },
-  { symbol: "d", ipa: "d" },
-  { symbol: "s", ipa: "s" },
-  { symbol: "n", ipa: "n" },
-  { symbol: "ch", ipa: "t͡ʃ" },
-  { symbol: "x", ipa: "ʃ" },
-  { symbol: "ñ", ipa: "ɲ" },
-  { symbol: "y", ipa: "j" },
-  { symbol: "t", ipa: "t" }
-];
-
 const MAX_RESULTS = 50;
 const RETRY_LIMIT = 100;
 const COPY_FEEDBACK_MS = 1200;
@@ -55,6 +26,7 @@ const RELATIONS = {
 const minInput = document.getElementById("minSyllables");
 const maxInput = document.getElementById("maxSyllables");
 const generateBtn = document.getElementById("generateBtn");
+const generationStatus = document.getElementById("generationStatus");
 const clearAllBtn = document.getElementById("clearAllBtn");
 const resultsList = document.getElementById("results");
 
@@ -72,6 +44,7 @@ const sharedApi = window.LOVE_LANGUAGE_SHARED || {};
 const sharedUtils = sharedApi.utils || {};
 const sharedUi = sharedApi.ui || {};
 const awsHelpers = window.LOVE_LANGUAGE_AWS || {};
+const rulesApi = window.LOVE_LANGUAGE_RULES || {};
 
 const trimOrEmpty =
   typeof sharedUtils.trimOrEmpty === "function"
@@ -133,6 +106,37 @@ const buildCopyPayload =
         const base = `${normalizedWord} /${normalizedPronunciation}/`;
         return normalizedMeaning ? `${base} : ${normalizedMeaning}` : base;
       };
+const cloneRuleConfig =
+  typeof rulesApi.cloneRuleConfig === "function" ? rulesApi.cloneRuleConfig : (config) => config;
+const loadActiveRuleConfig =
+  typeof rulesApi.loadActiveRuleConfig === "function"
+    ? rulesApi.loadActiveRuleConfig
+    : () => ({
+        vowels: [],
+        consonants: [],
+        syllablePatterns: {
+          single: [],
+          initial: [],
+          medial: [],
+          final: []
+        },
+        transitionRules: [],
+        wordEndBans: [],
+        syllableEndBans: []
+      });
+const evaluateRuleConfigCompatibility =
+  typeof rulesApi.evaluateRuleConfigCompatibility === "function"
+    ? rulesApi.evaluateRuleConfigCompatibility
+    : () => ({ isReady: true, message: "", errors: [] });
+const activeRulesStorageKey =
+  rulesApi.storageKeys && typeof rulesApi.storageKeys.active === "string"
+    ? rulesApi.storageKeys.active
+    : "";
+
+let activeRuleConfig = cloneRuleConfig(loadActiveRuleConfig());
+let ruleConfigCompatibility = { isReady: true, message: "", errors: [] };
+let poolManager = null;
+let ruleEngine = null;
 
 function getActivityTimestamp(item) {
   return Math.max(toEpochMs(item && item.updatedTimestamp), toEpochMs(item && item.timestamp));
@@ -211,7 +215,7 @@ function syncDisplayMeaning(state, importedMatch = null) {
     state.displayMeaning = importedMeaning;
     state.displayMeaningSource = DISPLAY_MEANING_SOURCES.IMPORTED;
     state.importedSourceRowId = trimOrEmpty(importedMatch.rowId);
-    state.importedSourceTimestamp = importedTimestamp;
+    state.importedSourceTimestamp = getActivityTimestamp(importedMatch);
     return;
   }
 
@@ -381,20 +385,84 @@ class PoolManager {
   }
 }
 
-function buildSyllablePattern(position, total) {
+function setGenerationStatus(message, isError = true) {
+  if (!generationStatus) {
+    return;
+  }
+
+  const hasMessage = hasMeaningText(message);
+  generationStatus.textContent = hasMessage ? trimOrEmpty(message) : "";
+  generationStatus.classList.toggle("is-hidden", !hasMessage);
+  generationStatus.classList.toggle("is-error", Boolean(hasMessage && isError));
+}
+
+function syncGenerationAvailability(min, max) {
+  ruleConfigCompatibility = evaluateRuleConfigCompatibility(activeRuleConfig, min, max);
+
+  if (generateBtn) {
+    generateBtn.disabled = !ruleConfigCompatibility.isReady;
+  }
+
+  if (ruleConfigCompatibility.isReady) {
+    setGenerationStatus("", false);
+    return ruleConfigCompatibility;
+  }
+
+  setGenerationStatus(ruleConfigCompatibility.message || "Current generation rules are not available.");
+  return ruleConfigCompatibility;
+}
+
+function applyGeneratorRuleConfig(config) {
+  const nextConfig = cloneRuleConfig(config);
+  activeRuleConfig = nextConfig;
+  ruleEngine = new RuleEngine();
+  poolManager = new PoolManager(nextConfig.vowels || [], nextConfig.consonants || []);
+
+  for (const transitionRule of nextConfig.transitionRules || []) {
+    ruleEngine.addTransitionRule(
+      transitionRule.scope,
+      transitionRule.triggerSymbol,
+      transitionRule.blockedNextSymbols
+    );
+  }
+
+  for (const symbol of nextConfig.wordEndBans || []) {
+    ruleEngine.addWordEndBan(symbol);
+  }
+
+  for (const symbol of nextConfig.syllableEndBans || []) {
+    ruleEngine.addSyllableEndBan(symbol);
+  }
+}
+
+function reloadActiveGeneratorRules() {
+  applyGeneratorRuleConfig(loadActiveRuleConfig());
+  const { min, max } = clampSyllables(false);
+  syncGenerationAvailability(min, max);
+}
+
+function getActivePatternOptions(position, total) {
+  const patterns =
+    activeRuleConfig && activeRuleConfig.syllablePatterns ? activeRuleConfig.syllablePatterns : {};
+
   if (total === 1) {
-    return randomFrom(["CV", "V", "CVC"]);
+    return Array.isArray(patterns.single) ? patterns.single.filter(Boolean) : [];
   }
 
   if (position === 0) {
-    return randomFrom(["CV", "V"]);
+    return Array.isArray(patterns.initial) ? patterns.initial.filter(Boolean) : [];
   }
 
   if (position === total - 1) {
-    return randomFrom(["CV", "CVC"]);
+    return Array.isArray(patterns.final) ? patterns.final.filter(Boolean) : [];
   }
 
-  return "CV";
+  return Array.isArray(patterns.medial) ? patterns.medial.filter(Boolean) : [];
+}
+
+function buildSyllablePattern(position, total) {
+  const options = getActivePatternOptions(position, total);
+  return options.length > 0 ? randomFrom(options) : null;
 }
 
 function buildWordSlots(syllablePatterns) {
@@ -447,6 +515,7 @@ function clampSyllables(shouldPersist = true) {
     saveSyllableSettings({ min, max });
   }
 
+  syncGenerationAvailability(min, max);
   return { min, max };
 }
 
@@ -1670,38 +1739,20 @@ function handleMeaningInputKeydown(event) {
   }
 }
 
-const ruleEngine = new RuleEngine();
-const poolManager = new PoolManager(vowels, consonants);
-
-function addWordRule(triggerSymbol, blockedNextSymbols) {
-  ruleEngine.addWordRule(triggerSymbol, blockedNextSymbols);
-}
-
-function addSyllableRule(triggerSymbol, blockedNextSymbols) {
-  ruleEngine.addSyllableRule(triggerSymbol, blockedNextSymbols);
-}
-
-function addBoundaryRule(triggerSymbol, blockedNextSymbols) {
-  ruleEngine.addBoundaryRule(triggerSymbol, blockedNextSymbols);
-}
-
-function addWordEndBan(symbol) {
-  ruleEngine.addWordEndBan(symbol);
-}
-
-function addSyllableEndBan(symbol) {
-  ruleEngine.addSyllableEndBan(symbol);
-}
-
-addSyllableEndBan("y");
-addSyllableEndBan("ñ");
-addSyllableEndBan("j");
-
 function buildWord(min, max) {
+  if (!poolManager || !ruleEngine) {
+    return null;
+  }
+
   const syllableCount = Math.floor(Math.random() * (max - min + 1)) + min;
   const syllablePatterns = [];
   for (let i = 0; i < syllableCount; i += 1) {
-    syllablePatterns.push(buildSyllablePattern(i, syllableCount));
+    const pattern = buildSyllablePattern(i, syllableCount);
+    if (!pattern) {
+      return null;
+    }
+
+    syllablePatterns.push(pattern);
   }
 
   const slots = buildWordSlots(syllablePatterns);
@@ -1806,12 +1857,18 @@ function removeOldestRowsIfNeeded() {
 
 function addResult() {
   const { min, max } = clampSyllables();
-  const generated = generateUniqueWord(min, max);
-
-  if (!generated) {
+  if (!ruleConfigCompatibility.isReady) {
     return;
   }
 
+  const generated = generateUniqueWord(min, max);
+
+  if (!generated) {
+    setGenerationStatus("Could not generate a unique word with the current rules.");
+    return;
+  }
+
+  setGenerationStatus("", false);
   const state = createRowState(generated);
   rowStateById.set(state.rowId, state);
 
@@ -1901,6 +1958,15 @@ async function handleResultListClick(event) {
 sharedAudio.addEventListener("ended", () => clearPlayState());
 sharedAudio.addEventListener("error", () => clearPlayState());
 
+function handleStorageSync(event) {
+  if (!event || event.key !== activeRulesStorageKey) {
+    return;
+  }
+
+  reloadActiveGeneratorRules();
+}
+
+reloadActiveGeneratorRules();
 loadPersistedSyllableSettings();
 clampSyllables();
 restorePersistedRows();
@@ -1923,10 +1989,13 @@ document.addEventListener("click", (event) => {
 window.addEventListener("beforeunload", () => {
   flushPersistedRowsSave();
 });
+window.addEventListener("storage", handleStorageSync);
 
 minInput.addEventListener("change", clampSyllables);
 maxInput.addEventListener("change", clampSyllables);
-generateBtn.addEventListener("click", addResult);
+if (generateBtn) {
+  generateBtn.addEventListener("click", addResult);
+}
 if (clearAllBtn) {
   clearAllBtn.addEventListener("click", handleClearAllClick);
 }

@@ -8,8 +8,13 @@
 </head>
 <body>
   <main class="app">
-    <nav class="page-nav">
-      <a class="page-nav-link" href="dictionary.html">Dictionary</a>
+    <nav class="page-nav page-nav-split">
+      <div class="page-nav-group">
+        <a class="page-nav-link" href="settings.html">Settings</a>
+      </div>
+      <div class="page-nav-group page-nav-group-right">
+        <a class="page-nav-link" href="dictionary.html">Dictionary</a>
+      </div>
     </nav>
 
     <h1>xo Language Word Generator</h1>
@@ -28,6 +33,7 @@
     </section>
 
     <button id="generateBtn" class="generate-btn" type="button">Generate</button>
+    <p id="generationStatus" class="generation-status is-hidden" role="status" aria-live="polite"></p>
 
     <section class="results-section" aria-live="polite">
       <div class="results-header">
@@ -41,6 +47,7 @@
   <script src="aws-config.js"></script>
   <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1692.0.min.js"></script>
   <script src="shared.js"></script>
+  <script src="rules-config.js"></script>
   <script src="script.js"></script>
 </body>
 </html>

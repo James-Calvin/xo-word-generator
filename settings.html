@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>xo Settings</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app app-settings">
+    <nav class="page-nav">
+      <a class="page-nav-link" href="index.html">Back to Generator</a>
+    </nav>
+
+    <h1>xo Generator Settings</h1>
+    <p class="settings-intro">
+      Edit the local generation rules used by this browser. Valid drafts apply automatically to future generations.
+    </p>
+
+    <section class="settings-toolbar" aria-label="Settings actions">
+      <div class="settings-toolbar-group">
+        <button id="importRulesBtn" class="settings-btn" type="button">Import</button>
+        <button id="exportRulesBtn" class="settings-btn" type="button">Export</button>
+        <button id="blankSlateBtn" class="settings-btn is-danger" type="button">Blank slate</button>
+        <button id="restoreDefaultsBtn" class="settings-btn" type="button">Restore defaults</button>
+      </div>
+      <input id="importRulesInput" type="file" accept="application/json,.json" hidden>
+    </section>
+
+    <section class="settings-status-panel" aria-live="polite">
+      <p id="settingsApplyStatus" class="settings-apply-status"></p>
+      <p id="settingsImportStatus" class="settings-import-status is-hidden"></p>
+      <ul id="settingsErrorList" class="settings-error-list"></ul>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-header">
+        <div>
+          <h2>Symbols and Sounds</h2>
+          <p class="settings-card-help">Define the symbol inventories available to the generator.</p>
+        </div>
+      </div>
+      <div class="settings-two-column">
+        <div class="settings-subsection">
+          <div class="settings-subsection-header">
+            <h3>Vowels</h3>
+            <button class="settings-link-btn" type="button" data-add-section="vowels">Add vowel</button>
+          </div>
+          <div id="vowelsList" class="rule-list"></div>
+        </div>
+        <div class="settings-subsection">
+          <div class="settings-subsection-header">
+            <h3>Consonants</h3>
+            <button class="settings-link-btn" type="button" data-add-section="consonants">Add consonant</button>
+          </div>
+          <div id="consonantsList" class="rule-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-header">
+        <div>
+          <h2>Syllable Patterns</h2>
+          <p class="settings-card-help">These pattern lists control the structure of generated syllables.</p>
+        </div>
+      </div>
+      <div id="syllablePatternsGrid" class="settings-pattern-grid"></div>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-header">
+        <div>
+          <h2>Transition Rules</h2>
+          <p class="settings-card-help">Block specific next symbols within a syllable, across a boundary, or anywhere in a word.</p>
+        </div>
+        <button class="settings-link-btn" type="button" data-add-section="transitionRules">Add rule</button>
+      </div>
+      <div id="transitionRulesList" class="rule-list"></div>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-header">
+        <div>
+          <h2>End Bans</h2>
+          <p class="settings-card-help">Prevent symbols from ending a syllable or an entire word.</p>
+        </div>
+      </div>
+      <div class="settings-two-column">
+        <div class="settings-subsection">
+          <div class="settings-subsection-header">
+            <h3>Syllable-end bans</h3>
+            <button class="settings-link-btn" type="button" data-add-section="syllableEndBans">Add ban</button>
+          </div>
+          <div id="syllableEndBansList" class="rule-list"></div>
+        </div>
+        <div class="settings-subsection">
+          <div class="settings-subsection-header">
+            <h3>Word-end bans</h3>
+            <button class="settings-link-btn" type="button" data-add-section="wordEndBans">Add ban</button>
+          </div>
+          <div id="wordEndBansList" class="rule-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <datalist id="knownRuleSymbols"></datalist>
+  </main>
+
+  <script src="shared.js"></script>
+  <script src="rules-config.js"></script>
+  <script src="settings.js"></script>
+</body>
+</html>
