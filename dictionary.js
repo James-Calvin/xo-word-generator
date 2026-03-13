@@ -311,7 +311,7 @@ function renderEntryMeaning(row, entry) {
 
   const definition = document.createElement("span");
   definition.className = "meaning-definition";
-  definition.textContent = `Definition: ${entry.meaning}`;
+  definition.textContent = `— ${entry.meaning}`;
   container.appendChild(definition);
 
   if (entry.isEditing && isSelected) {

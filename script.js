@@ -1,12 +1,12 @@
 const vowels = [
   { symbol: "a", ipa: "æ" },
-  { symbol: "ee", ipa: "i" },
+  { symbol: "ie", ipa: "i" },
   { symbol: "ai", ipa: "eɪ" },
   { symbol: "i", ipa: "ɪ" },
   { symbol: "u", ipa: "ə" },
   { symbol: "au", ipa: "a" },
-  { symbol: "o", ipa: "o" },
-  { symbol: "oo", ipa: "u" }
+  { symbol: "o", ipa: "ō" },
+  { symbol: "oo", ipa: "u" },
 ];
 
 const consonants = [
@@ -1108,7 +1108,7 @@ function renderMeaning(row, state) {
   if (state.meaning) {
     const definition = document.createElement("span");
     definition.className = "meaning-definition";
-    definition.textContent = `Definition: ${state.meaning}`;
+    definition.textContent = `— ${state.meaning}`;
     container.appendChild(definition);
   }
 
