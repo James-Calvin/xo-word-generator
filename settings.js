@@ -100,6 +100,7 @@
   let draftValidation = validateRuleConfig(draftConfig);
   let importFeedbackMessage = "";
   let importFeedbackIsError = false;
+  let pendingDeleteKey = "";
 
   function capitalizeLabel(value) {
     const normalizedValue = trimOrEmpty(value);
@@ -140,6 +141,72 @@
       default:
         return "No rules yet.";
     }
+  }
+
+  function buildDeleteKey({ kind, section = "", patternKey = "", index }) {
+    return [trimOrEmpty(kind), trimOrEmpty(section), trimOrEmpty(patternKey), String(index)].join("|");
+  }
+
+  function getDeleteKeyFromButton(button) {
+    if (!button) {
+      return "";
+    }
+
+    return buildDeleteKey({
+      kind: button.dataset.kind,
+      section: button.dataset.section,
+      patternKey: button.dataset.patternKey,
+      index: button.dataset.index
+    });
+  }
+
+  function getDeleteButtonText(isPendingDelete) {
+    return isPendingDelete ? "Confirm delete" : "Delete row";
+  }
+
+  function renderDeleteButton({ kind, section = "", patternKey = "", index }) {
+    const deleteKey = buildDeleteKey({ kind, section, patternKey, index });
+    const isPendingDelete = pendingDeleteKey === deleteKey;
+
+    return `
+      <button
+        class="settings-delete-btn${isPendingDelete ? " is-pending-delete" : ""}"
+        type="button"
+        data-action="delete-row"
+        data-kind="${escapeHtml(kind)}"
+        ${section ? `data-section="${escapeHtml(section)}"` : ""}
+        ${patternKey ? `data-pattern-key="${escapeHtml(patternKey)}"` : ""}
+        data-index="${index}"
+        data-delete-key="${escapeHtml(deleteKey)}"
+        aria-label="${getDeleteButtonText(isPendingDelete)}"
+        title="${getDeleteButtonText(isPendingDelete)}"
+      ></button>
+    `;
+  }
+
+  function syncPendingDeleteButtons() {
+    if (!app) {
+      return;
+    }
+
+    const buttons = app.querySelectorAll(".settings-delete-btn[data-delete-key]");
+    for (const button of buttons) {
+      const buttonKey = trimOrEmpty(button.dataset.deleteKey);
+      const isPendingDelete = Boolean(buttonKey) && buttonKey === pendingDeleteKey;
+      const label = getDeleteButtonText(isPendingDelete);
+      button.classList.toggle("is-pending-delete", isPendingDelete);
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+    }
+  }
+
+  function clearPendingDeleteState() {
+    if (!pendingDeleteKey) {
+      return;
+    }
+
+    pendingDeleteKey = "";
+    syncPendingDeleteButtons();
   }
 
   function getKnownSymbols() {
@@ -212,16 +279,11 @@
                 autocomplete="off"
               >
             </label>
-            <button
-              class="settings-delete-btn"
-              type="button"
-              data-action="delete-row"
-              data-kind="inventory"
-              data-section="${sectionKey}"
-              data-index="${index}"
-            >
-              Delete
-            </button>
+            ${renderDeleteButton({
+              kind: "inventory",
+              section: sectionKey,
+              index
+            })}
           </div>
         `
       )
@@ -258,16 +320,11 @@
                         spellcheck="false"
                       >
                     </label>
-                    <button
-                      class="settings-delete-btn"
-                      type="button"
-                      data-action="delete-row"
-                      data-kind="pattern"
-                      data-pattern-key="${key}"
-                      data-index="${index}"
-                    >
-                      Delete
-                    </button>
+                    ${renderDeleteButton({
+                      kind: "pattern",
+                      patternKey: key,
+                      index
+                    })}
                   </div>
                 `
               )
@@ -277,10 +334,12 @@
         <div class="settings-pattern-card">
           <div class="settings-subsection-header">
             <h3>${escapeHtml(getPatternLabel(key))}</h3>
-            <button class="settings-link-btn" type="button" data-action="add-pattern" data-pattern-key="${key}">Add pattern</button>
           </div>
           <p class="settings-pattern-help">Use only C and V tokens.</p>
           <div class="rule-list">${rowsHtml}</div>
+          <div class="settings-list-footer">
+            <button class="settings-link-btn" type="button" data-action="add-pattern" data-pattern-key="${key}">Add pattern</button>
+          </div>
         </div>
       `;
     }).join("");
@@ -341,15 +400,10 @@
                 autocomplete="off"
               >
             </label>
-            <button
-              class="settings-delete-btn"
-              type="button"
-              data-action="delete-row"
-              data-kind="transition"
-              data-index="${index}"
-            >
-              Delete
-            </button>
+            ${renderDeleteButton({
+              kind: "transition",
+              index
+            })}
           </div>
         `;
       })
@@ -384,16 +438,11 @@
                 autocomplete="off"
               >
             </label>
-            <button
-              class="settings-delete-btn"
-              type="button"
-              data-action="delete-row"
-              data-kind="ban"
-              data-section="${sectionKey}"
-              data-index="${index}"
-            >
-              Delete
-            </button>
+            ${renderDeleteButton({
+              kind: "ban",
+              section: sectionKey,
+              index
+            })}
           </div>
         `
       )
@@ -644,6 +693,32 @@
   }
 
   function handleClick(event) {
+    const deleteButton = event.target.closest(".settings-delete-btn[data-action='delete-row']");
+    if (deleteButton) {
+      const deleteKey = getDeleteKeyFromButton(deleteButton);
+      if (!deleteKey) {
+        return;
+      }
+
+      if (pendingDeleteKey === deleteKey) {
+        deleteRow(deleteButton);
+        pendingDeleteKey = "";
+        importFeedbackMessage = "";
+        importFeedbackIsError = false;
+        persistDraftAndRender();
+        return;
+      }
+
+      pendingDeleteKey = deleteKey;
+      syncPendingDeleteButtons();
+      return;
+    }
+
+    if (pendingDeleteKey) {
+      clearPendingDeleteState();
+      return;
+    }
+
     const actionButton = event.target.closest("[data-action], [data-add-section]");
     if (!actionButton) {
       return;
@@ -682,8 +757,41 @@
       return;
     }
 
+    clearPendingDeleteState();
     updateDraftFromField(field);
     persistDraftState();
+  }
+
+  function handleFocusIn(event) {
+    if (!pendingDeleteKey) {
+      return;
+    }
+
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      clearPendingDeleteState();
+      return;
+    }
+
+    if (!target.closest(".settings-delete-btn[data-action='delete-row']")) {
+      clearPendingDeleteState();
+    }
+  }
+
+  function handleDocumentClick(event) {
+    if (!pendingDeleteKey) {
+      return;
+    }
+
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      clearPendingDeleteState();
+      return;
+    }
+
+    if (!app || !app.contains(target)) {
+      clearPendingDeleteState();
+    }
   }
 
   function handleStorageSync(event) {
@@ -703,6 +811,7 @@
     app.addEventListener("click", handleClick);
     app.addEventListener("input", handleInput);
     app.addEventListener("change", handleInput);
+    app.addEventListener("focusin", handleFocusIn);
   }
 
   if (importRulesBtn && importRulesInput) {
@@ -727,5 +836,6 @@
   }
 
   globalScope.addEventListener("storage", handleStorageSync);
+  document.addEventListener("click", handleDocumentClick);
   renderAll();
 })(window);
