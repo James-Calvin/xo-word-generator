@@ -434,6 +434,322 @@
     };
   }
 
+  function getRelationToNextForEntries(entries, index, syllableSpans) {
+    if (index >= entries.length - 1) {
+      return "none";
+    }
+
+    for (const span of syllableSpans) {
+      if (index >= span.startIndex && index < span.endIndex - 1) {
+        return "sameSyllable";
+      }
+
+      if (index === span.endIndex - 1) {
+        return "boundary";
+      }
+    }
+
+    return "none";
+  }
+
+  function resolveBlockedNextSymbolsForConfig(config, triggerSymbol, relationToNext) {
+    if (relationToNext === "none") {
+      return [];
+    }
+
+    const blocked = [];
+    for (const rule of config.transitionRules) {
+      if (rule.triggerSymbol !== triggerSymbol) {
+        continue;
+      }
+
+      if (rule.scope === "word") {
+        if (relationToNext === "sameSyllable" || relationToNext === "boundary") {
+          blocked.push(...rule.blockedNextSymbols);
+        }
+        continue;
+      }
+
+      if (rule.scope === "syllable" && relationToNext === "sameSyllable") {
+        blocked.push(...rule.blockedNextSymbols);
+        continue;
+      }
+
+      if (rule.scope === "boundary" && relationToNext === "boundary") {
+        blocked.push(...rule.blockedNextSymbols);
+      }
+    }
+
+    return [...new Set(blocked)];
+  }
+
+  function normalizePronunciationForComparison(value) {
+    return trimOrEmpty(value)
+      .replace(/[./\s]+/g, "")
+      .replace(/^\/+|\/+$/g, "");
+  }
+
+  function buildAnalyzerSymbolEntries(config) {
+    const entries = [];
+
+    for (const vowel of config.vowels) {
+      if (!vowel.symbol || !vowel.ipa) {
+        continue;
+      }
+
+      entries.push({
+        symbol: vowel.symbol,
+        ipa: vowel.ipa,
+        type: SLOT_TYPES.VOWEL
+      });
+    }
+
+    for (const consonant of config.consonants) {
+      if (!consonant.symbol || !consonant.ipa) {
+        continue;
+      }
+
+      entries.push({
+        symbol: consonant.symbol,
+        ipa: consonant.ipa,
+        type: SLOT_TYPES.CONSONANT
+      });
+    }
+
+    return entries.sort((left, right) => {
+      const lengthDiff = right.symbol.length - left.symbol.length;
+      if (lengthDiff !== 0) {
+        return lengthDiff;
+      }
+
+      return left.symbol.localeCompare(right.symbol);
+    });
+  }
+
+  function buildExpectedPronunciation(symbolEntries, syllableSpans) {
+    return syllableSpans
+      .map((span) =>
+        symbolEntries
+          .slice(span.startIndex, span.endIndex)
+          .map((entry) => entry.ipa)
+          .join("")
+      )
+      .join(".");
+  }
+
+  function buildSegmentation(symbolEntries, syllableSpans) {
+    return syllableSpans.map((span) =>
+      symbolEntries.slice(span.startIndex, span.endIndex).map((entry) => entry.symbol)
+    );
+  }
+
+  function doPatternTypesMatch(symbolEntries, startIndex, pattern) {
+    if (!pattern || startIndex + pattern.length > symbolEntries.length) {
+      return false;
+    }
+
+    for (let offset = 0; offset < pattern.length; offset += 1) {
+      if (symbolEntries[startIndex + offset].type !== pattern.charAt(offset)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function validateTransitionSequence(config, symbolEntries, syllableSpans) {
+    const syllableEndBans = new Set(config.syllableEndBans.filter(Boolean));
+    const wordEndBans = new Set(config.wordEndBans.filter(Boolean));
+
+    for (const span of syllableSpans) {
+      const lastEntry = symbolEntries[span.endIndex - 1];
+      if (!lastEntry) {
+        return false;
+      }
+
+      if (syllableEndBans.has(lastEntry.symbol)) {
+        return false;
+      }
+    }
+
+    const finalEntry = symbolEntries[symbolEntries.length - 1];
+    if (finalEntry && wordEndBans.has(finalEntry.symbol)) {
+      return false;
+    }
+
+    for (let index = 0; index < symbolEntries.length - 1; index += 1) {
+      const currentEntry = symbolEntries[index];
+      const nextEntry = symbolEntries[index + 1];
+      const relationToNext = getRelationToNextForEntries(symbolEntries, index, syllableSpans);
+      const blockedSymbols = resolveBlockedNextSymbolsForConfig(
+        config,
+        currentEntry.symbol,
+        relationToNext
+      );
+
+      if (blockedSymbols.includes(nextEntry.symbol)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function findValidSyllableSpans(config, symbolEntries) {
+    if (!Array.isArray(symbolEntries) || symbolEntries.length === 0) {
+      return null;
+    }
+
+    for (let syllableCount = 1; syllableCount <= symbolEntries.length; syllableCount += 1) {
+      const spans = [];
+
+      function backtrack(symbolIndex, syllableIndex) {
+        if (syllableIndex === syllableCount) {
+          return symbolIndex === symbolEntries.length;
+        }
+
+        const patternOptions = getPatternsForCount(config, syllableCount, syllableIndex);
+        if (!Array.isArray(patternOptions) || patternOptions.length === 0) {
+          return false;
+        }
+
+        for (const pattern of patternOptions) {
+          if (!pattern || !doPatternTypesMatch(symbolEntries, symbolIndex, pattern)) {
+            continue;
+          }
+
+          const endIndex = symbolIndex + pattern.length;
+          if (endIndex > symbolEntries.length) {
+            continue;
+          }
+
+          spans.push({
+            pattern,
+            startIndex: symbolIndex,
+            endIndex
+          });
+
+          if (backtrack(endIndex, syllableIndex + 1)) {
+            return true;
+          }
+
+          spans.pop();
+        }
+
+        return false;
+      }
+
+      if (backtrack(0, 0) && validateTransitionSequence(config, symbolEntries, spans)) {
+        return spans.map((span) => ({ ...span }));
+      }
+    }
+
+    return null;
+  }
+
+  function analyzeEntryAgainstRuleConfig({ word, pronunciation, config } = {}) {
+    const normalizedWord = trimOrEmpty(word);
+    const normalizedPronunciation = trimOrEmpty(pronunciation);
+    const validation = validateRuleConfig(config);
+
+    if (!validation.isValid) {
+      return {
+        available: false,
+        matchesRules: true,
+        warnings: [],
+        segmentation: [],
+        expectedPronunciation: "",
+        config: validation.config
+      };
+    }
+
+    const normalizedConfig = validation.config;
+    if (!normalizedWord) {
+      return {
+        available: true,
+        matchesRules: true,
+        warnings: [],
+        segmentation: [],
+        expectedPronunciation: "",
+        config: normalizedConfig
+      };
+    }
+
+    const symbolEntries = buildAnalyzerSymbolEntries(normalizedConfig);
+    const activeSymbols = symbolEntries.filter((entry) => normalizedWord.startsWith(entry.symbol));
+    if (activeSymbols.length === 0 && symbolEntries.length === 0) {
+      return {
+        available: true,
+        matchesRules: false,
+        warnings: ["Word does not match the current generator symbols or syllable rules."],
+        segmentation: [],
+        expectedPronunciation: "",
+        config: normalizedConfig
+      };
+    }
+
+    let matchedEntries = null;
+    let matchedSyllableSpans = null;
+
+    function backtrackTokenize(index, collectedEntries) {
+      if (index === normalizedWord.length) {
+        const syllableSpans = findValidSyllableSpans(normalizedConfig, collectedEntries);
+        if (syllableSpans) {
+          matchedEntries = [...collectedEntries];
+          matchedSyllableSpans = syllableSpans;
+          return true;
+        }
+
+        return false;
+      }
+
+      const matchingEntries = symbolEntries.filter((entry) =>
+        normalizedWord.startsWith(entry.symbol, index)
+      );
+
+      for (const entry of matchingEntries) {
+        collectedEntries.push(entry);
+        if (backtrackTokenize(index + entry.symbol.length, collectedEntries)) {
+          return true;
+        }
+        collectedEntries.pop();
+      }
+
+      return false;
+    }
+
+    backtrackTokenize(0, []);
+
+    if (!matchedEntries || !matchedSyllableSpans) {
+      return {
+        available: true,
+        matchesRules: false,
+        warnings: ["Word does not match the current generator symbols or syllable rules."],
+        segmentation: [],
+        expectedPronunciation: "",
+        config: normalizedConfig
+      };
+    }
+
+    const expectedPronunciation = buildExpectedPronunciation(matchedEntries, matchedSyllableSpans);
+    const warnings = [];
+    const normalizedExpected = normalizePronunciationForComparison(expectedPronunciation);
+    const normalizedActual = normalizePronunciationForComparison(normalizedPronunciation);
+
+    if (normalizedPronunciation && normalizedExpected !== normalizedActual) {
+      warnings.push(`IPA does not match the current symbol sounds (expected /${expectedPronunciation}/).`);
+    }
+
+    return {
+      available: true,
+      matchesRules: warnings.length === 0,
+      warnings,
+      segmentation: buildSegmentation(matchedEntries, matchedSyllableSpans),
+      expectedPronunciation,
+      config: normalizedConfig
+    };
+  }
+
   function loadStoredRuleConfig(storageKey) {
     const storage = getLocalStorageHandle();
     if (!storage) {
@@ -545,6 +861,7 @@
     normalizeRuleConfig,
     validateRuleConfig,
     evaluateRuleConfigCompatibility,
+    analyzeEntryAgainstRuleConfig,
     loadActiveRuleConfig,
     loadDraftRuleConfig,
     saveDraftRuleConfig,

@@ -21,7 +21,7 @@ body {
   margin: 0;
   min-height: 100vh;
   font-family: "Trebuchet MS", "Segoe UI", sans-serif;
-  background: linear-gradient(180deg, #070b10 0%, #101721 100%);
+  background: linear-gradient(180deg, #101721 0%, #070b10 100%);
   background-repeat: no-repeat;
   background-attachment: fixed;
   background-size: 100% 100%;
@@ -33,7 +33,7 @@ body {
   margin: 2rem auto;
   padding: 1.5rem;
   background: var(--bg-panel);
-  border: 1px solid var(--border);
+  /* border: 1px solid var(--border); */
   border-radius: 14px;
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
 }
@@ -116,7 +116,7 @@ h2 {
 .control-item input {
   width: 88px;
   padding: 0.45rem 0.55rem;
-  border: 1px solid var(--border);
+  border: 1px none;
   border-radius: 8px;
   font-size: 1rem;
   background: var(--bg-input);
@@ -199,7 +199,7 @@ h2 {
   gap: 0.7rem;
   min-height: 2.6rem;
   padding: 0.45rem 0.5rem;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 10px;
   line-height: 1.35;
   transition: background-color 0.16s ease, border-color 0.16s ease;
@@ -236,7 +236,7 @@ h2 {
 .action-btn {
   width: 1.95rem;
   height: 1.95rem;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 8px;
   background: #0f1620;
   color: var(--text-main);
@@ -408,7 +408,7 @@ h2 {
 .meaning-input {
   width: min(320px, 100%);
   min-width: 140px;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 8px;
   padding: 0.4rem 0.55rem;
   background: var(--bg-input);
@@ -747,10 +747,288 @@ h2 {
 
 .dictionary-toolbar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.7rem;
   margin: 0 0 1rem;
+}
+
+.dictionary-toolbar-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+
+.dictionary-toolbar-group-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dictionary-toolbar-group-right {
+  margin-left: auto;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.dictionary-composer {
+  margin: 0 0 1rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(7, 11, 16, 0.38);
+}
+
+.dictionary-composer.is-hidden {
+  display: none;
+}
+
+.dictionary-composer.has-rule-warning {
+  border-color: rgba(255, 194, 71, 0.4);
+  box-shadow: inset 0 0 0 1px rgba(255, 194, 71, 0.08);
+}
+
+.dictionary-composer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.dictionary-composer-title {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.dictionary-composer-help {
+  margin: 0.22rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.dictionary-composer-required-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.83rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dictionary-composer-required-star {
+  color: #ff9aa4;
+  font-weight: 800;
+}
+
+.dictionary-composer-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.dictionary-composer-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.dictionary-composer-field-wide {
+  grid-column: 1 / -1;
+}
+
+.dictionary-composer-label {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.dictionary-composer-field.is-invalid .dictionary-composer-label {
+  color: #ffb7c0;
+}
+
+.dictionary-composer-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.48rem 0.6rem;
+  background: var(--bg-input);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.dictionary-composer-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 153, 255, 0.24);
+}
+
+.dictionary-composer-field.is-invalid .dictionary-composer-input {
+  border-color: rgba(255, 79, 95, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(255, 79, 95, 0.12);
+}
+
+.dictionary-composer-field.is-invalid .dictionary-composer-input:focus {
+  border-color: #ff6676;
+  box-shadow: 0 0 0 3px rgba(255, 79, 95, 0.24);
+}
+
+.dictionary-composer-field-error {
+  min-height: 1rem;
+  color: #ff9aa4;
+  font-size: 0.79rem;
+  font-weight: 700;
+}
+
+.dictionary-composer-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}
+
+.dictionary-composer-btn {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(7, 11, 16, 0.46);
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0.56rem 0.82rem;
+  transition:
+    color 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.dictionary-composer-btn:hover,
+.dictionary-composer-btn:focus-visible {
+  border-color: rgba(0, 153, 255, 0.42);
+}
+
+.dictionary-composer-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.dictionary-composer-btn.is-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #071019;
+}
+
+.dictionary-composer-btn.is-primary:hover,
+.dictionary-composer-btn.is-primary:focus-visible {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.dictionary-composer-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dictionary-composer-warning-list {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.dictionary-composer-warning-list.is-hidden {
+  display: none;
+}
+
+.dictionary-warning-item {
+  position: relative;
+  display: inline-flex;
+}
+
+.dictionary-warning-badge {
+  width: 2.15rem;
+  height: 2.15rem;
+  border: 1px solid rgba(255, 194, 71, 0.42);
+  border-radius: 10px;
+  background: rgba(255, 194, 71, 0.18);
+  color: #ffd97a;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.dictionary-warning-badge:hover,
+.dictionary-warning-badge:focus-visible {
+  border-color: rgba(255, 194, 71, 0.72);
+  background: rgba(255, 194, 71, 0.24);
+}
+
+.dictionary-warning-badge:focus-visible {
+  outline: 2px solid rgba(255, 194, 71, 0.78);
+  outline-offset: 2px;
+}
+
+.dictionary-warning-badge:disabled {
+  cursor: not-allowed;
+}
+
+.dictionary-warning-tooltip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 0.55rem);
+  width: max-content;
+  max-width: min(280px, 72vw);
+  padding: 0.55rem 0.7rem;
+  border: 1px solid rgba(255, 194, 71, 0.44);
+  border-radius: 10px;
+  background: #2c220f;
+  color: #fff4d5;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.4;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, 0.35rem);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease,
+    visibility 0.18s ease;
+  z-index: 20;
+}
+
+.dictionary-warning-tooltip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-right: 1px solid rgba(255, 194, 71, 0.44);
+  border-bottom: 1px solid rgba(255, 194, 71, 0.44);
+  background: #2c220f;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.dictionary-warning-item:hover .dictionary-warning-tooltip,
+.dictionary-warning-item:focus-within .dictionary-warning-tooltip,
+.dictionary-warning-item.is-open .dictionary-warning-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
 }
 
 .dictionary-filters {
@@ -1020,13 +1298,38 @@ h2 {
     align-items: stretch;
   }
 
+  .dictionary-toolbar-group {
+    width: 100%;
+  }
+
+  .dictionary-toolbar-group-right {
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .dictionary-composer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dictionary-composer-actions {
+    align-items: stretch;
+  }
+
+  .dictionary-composer-btn {
+    width: 100%;
+  }
+
   .dictionary-filters {
     width: 100%;
     flex-wrap: wrap;
   }
 
-  .dictionary-toggle-btn {
+  .dictionary-toolbar-group-left .dictionary-toggle-btn {
     width: 100%;
+  }
+
+  .dictionary-toolbar-group-right .dictionary-toggle-btn {
+    width: auto;
   }
 
   .dictionary-filter-btn {

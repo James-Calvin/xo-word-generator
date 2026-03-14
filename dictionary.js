@@ -19,7 +19,9 @@ const EMPTY_STATUS_BY_FILTER = {
 };
 
 const dictionaryFilters = document.getElementById("dictionaryFilters");
+const addWordButton = document.getElementById("dictionaryAddWordBtn");
 const myHeartsToggle = document.getElementById("dictionaryMyHeartsToggle");
+const dictionaryComposer = document.getElementById("dictionaryComposer");
 const dictionaryList = document.getElementById("dictionaryList");
 const dictionaryStatus = document.getElementById("dictionaryStatus");
 const dictionarySentinel = document.getElementById("dictionarySentinel");
@@ -46,6 +48,7 @@ const sharedApi = window.LOVE_LANGUAGE_SHARED || {};
 const sharedUtils = sharedApi.utils || {};
 const sharedUi = sharedApi.ui || {};
 const awsHelpers = window.LOVE_LANGUAGE_AWS || {};
+const rulesApi = window.LOVE_LANGUAGE_RULES || {};
 
 const trimOrEmpty =
   typeof sharedUtils.trimOrEmpty === "function"
@@ -103,6 +106,58 @@ const buildCopyPayload =
         const base = `${normalizedWord} /${normalizedPronunciation}/`;
         return normalizedMeaning ? `${base} : ${normalizedMeaning}` : base;
       };
+const loadActiveRuleConfig =
+  typeof rulesApi.loadActiveRuleConfig === "function"
+    ? rulesApi.loadActiveRuleConfig
+    : () => null;
+const validateRuleConfig =
+  typeof rulesApi.validateRuleConfig === "function"
+    ? rulesApi.validateRuleConfig
+    : () => ({ isValid: false, config: null });
+const analyzeEntryAgainstRuleConfig =
+  typeof rulesApi.analyzeEntryAgainstRuleConfig === "function"
+    ? rulesApi.analyzeEntryAgainstRuleConfig
+    : () => ({
+        available: false,
+        matchesRules: true,
+        warnings: [],
+        segmentation: [],
+        expectedPronunciation: ""
+      });
+const activeRulesStorageKey =
+  rulesApi.storageKeys && typeof rulesApi.storageKeys.active === "string"
+    ? rulesApi.storageKeys.active
+    : "";
+
+function createManualComposerValidation() {
+  return {
+    available: false,
+    matchesRules: true,
+    warnings: [],
+    segmentation: [],
+    expectedPronunciation: ""
+  };
+}
+
+function createManualComposerFieldErrors() {
+  return {
+    word: "",
+    pronunciation: "",
+    meaning: ""
+  };
+}
+
+const manualComposerState = {
+  isOpen: false,
+  word: "",
+  pronunciation: "",
+  meaning: "",
+  validation: createManualComposerValidation(),
+  fieldErrors: createManualComposerFieldErrors(),
+  hasAttemptedSave: false,
+  openWarningIndex: -1,
+  saveStatus: "idle"
+};
 
 function getActivityTimestamp(record) {
   return Math.max(toEpochMs(record && record.updatedTimestamp), toEpochMs(record && record.timestamp));
@@ -138,6 +193,124 @@ function getEmptyStatusMessage(filter = activeFilter) {
 
 function getGroupStatusLabel(classification) {
   return classification === GROUP_CLASSIFICATIONS.UNDEFINED ? "Undefined" : "Defined";
+}
+
+function getManualComposerSaveLabel() {
+  return manualComposerState.saveStatus === "saving" ? "Saving..." : "Save word";
+}
+
+function getManualComposerFieldErrors() {
+  return {
+    word: hasMeaningText(manualComposerState.word) ? "" : "Word is required.",
+    pronunciation: hasMeaningText(manualComposerState.pronunciation) ? "" : "IPA is required.",
+    meaning: hasMeaningText(manualComposerState.meaning) ? "" : "Meaning is required."
+  };
+}
+
+function syncManualComposerFieldErrors() {
+  manualComposerState.fieldErrors = manualComposerState.hasAttemptedSave
+    ? getManualComposerFieldErrors()
+    : createManualComposerFieldErrors();
+
+  return manualComposerState.fieldErrors;
+}
+
+function getFirstManualComposerInvalidField(fieldErrors = manualComposerState.fieldErrors) {
+  if (trimOrEmpty(fieldErrors.word)) {
+    return "word";
+  }
+
+  if (trimOrEmpty(fieldErrors.pronunciation)) {
+    return "pronunciation";
+  }
+
+  if (trimOrEmpty(fieldErrors.meaning)) {
+    return "meaning";
+  }
+
+  return "";
+}
+
+function getManualComposerInputId(fieldName) {
+  if (fieldName === "word") {
+    return "dictionaryComposerWord";
+  }
+
+  if (fieldName === "pronunciation") {
+    return "dictionaryComposerPronunciation";
+  }
+
+  if (fieldName === "meaning") {
+    return "dictionaryComposerMeaning";
+  }
+
+  return "";
+}
+
+function focusManualComposerField(fieldName) {
+  const inputId = getManualComposerInputId(fieldName);
+  if (!inputId) {
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    const input = document.getElementById(inputId);
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+}
+
+function getManualComposerWarningMessages(validation = manualComposerState.validation) {
+  if (
+    !validation ||
+    !validation.available ||
+    validation.matchesRules ||
+    !Array.isArray(validation.warnings)
+  ) {
+    return [];
+  }
+
+  return validation.warnings.map((warning) => trimOrEmpty(warning)).filter(Boolean);
+}
+
+function closeManualComposerWarningTooltip() {
+  if (manualComposerState.openWarningIndex < 0) {
+    return;
+  }
+
+  manualComposerState.openWarningIndex = -1;
+  syncManualComposerUiState();
+}
+
+function syncManualComposerValidation() {
+  if (!manualComposerState.isOpen) {
+    manualComposerState.validation = createManualComposerValidation();
+    return manualComposerState.validation;
+  }
+
+  if (!hasMeaningText(manualComposerState.word) || !hasMeaningText(manualComposerState.pronunciation)) {
+    manualComposerState.validation = createManualComposerValidation();
+    return manualComposerState.validation;
+  }
+
+  const activeRuleConfig = loadActiveRuleConfig();
+  const activeRuleValidation = validateRuleConfig(activeRuleConfig);
+  if (!activeRuleValidation.isValid) {
+    manualComposerState.validation = createManualComposerValidation();
+    return manualComposerState.validation;
+  }
+
+  manualComposerState.validation = analyzeEntryAgainstRuleConfig({
+    word: manualComposerState.word,
+    pronunciation: manualComposerState.pronunciation,
+    config: activeRuleValidation.config
+  });
+
+  return manualComposerState.validation;
 }
 
 const normalizedAwsConfig =
@@ -443,6 +616,208 @@ function updateSentinelVisibility() {
 
   const hide = visibleGroups.length === 0 || renderedGroupCount >= visibleGroups.length;
   dictionarySentinel.classList.toggle("is-hidden", hide);
+}
+
+function renderManualComposer() {
+  if (addWordButton) {
+    addWordButton.setAttribute("aria-expanded", manualComposerState.isOpen ? "true" : "false");
+    addWordButton.classList.toggle("is-active", manualComposerState.isOpen);
+    addWordButton.disabled = !isDictionaryConfigured || manualComposerState.saveStatus === "saving";
+  }
+
+  if (!dictionaryComposer) {
+    return;
+  }
+
+  if (!manualComposerState.isOpen) {
+    dictionaryComposer.textContent = "";
+    dictionaryComposer.classList.add("is-hidden");
+    dictionaryComposer.classList.remove("has-rule-warning");
+    return;
+  }
+
+  dictionaryComposer.classList.remove("is-hidden");
+  dictionaryComposer.innerHTML = `
+    <div class="dictionary-composer-header">
+      <div>
+        <h2 class="dictionary-composer-title">Add a Manual Word</h2>
+        <p class="dictionary-composer-help">Create your own word directly in the dictionary. This bypasses generation.</p>
+      </div>
+      <p class="dictionary-composer-required-note">
+        <span class="dictionary-composer-required-star" aria-hidden="true">*</span> is a required field
+      </p>
+    </div>
+    <div class="dictionary-composer-grid">
+      <label class="dictionary-composer-field" data-composer-field="word">
+        <span class="dictionary-composer-label">
+          Word <span class="dictionary-composer-required-star" aria-hidden="true">*</span>
+        </span>
+        <input
+          id="dictionaryComposerWord"
+          class="dictionary-composer-input"
+          type="text"
+          autocomplete="off"
+          aria-required="true"
+          aria-describedby="dictionaryComposerWordError"
+          value="${escapeXml(manualComposerState.word)}"
+          ${manualComposerState.saveStatus === "saving" ? "disabled" : ""}
+        >
+        <span id="dictionaryComposerWordError" class="dictionary-composer-field-error" aria-live="polite"></span>
+      </label>
+      <label class="dictionary-composer-field" data-composer-field="pronunciation">
+        <span class="dictionary-composer-label">
+          IPA <span class="dictionary-composer-required-star" aria-hidden="true">*</span>
+        </span>
+        <input
+          id="dictionaryComposerPronunciation"
+          class="dictionary-composer-input"
+          type="text"
+          autocomplete="off"
+          aria-required="true"
+          aria-describedby="dictionaryComposerPronunciationError"
+          value="${escapeXml(manualComposerState.pronunciation)}"
+          ${manualComposerState.saveStatus === "saving" ? "disabled" : ""}
+        >
+        <span id="dictionaryComposerPronunciationError" class="dictionary-composer-field-error" aria-live="polite"></span>
+      </label>
+      <label class="dictionary-composer-field dictionary-composer-field-wide" data-composer-field="meaning">
+        <span class="dictionary-composer-label">
+          Meaning <span class="dictionary-composer-required-star" aria-hidden="true">*</span>
+        </span>
+        <input
+          id="dictionaryComposerMeaning"
+          class="dictionary-composer-input"
+          type="text"
+          autocomplete="off"
+          aria-required="true"
+          aria-describedby="dictionaryComposerMeaningError"
+          value="${escapeXml(manualComposerState.meaning)}"
+          ${manualComposerState.saveStatus === "saving" ? "disabled" : ""}
+        >
+        <span id="dictionaryComposerMeaningError" class="dictionary-composer-field-error" aria-live="polite"></span>
+      </label>
+    </div>
+    <div class="dictionary-composer-actions">
+      <button
+        id="dictionaryComposerSaveBtn"
+        class="dictionary-composer-btn is-primary"
+        type="button"
+      >
+        Save word
+      </button>
+      <div id="dictionaryComposerWarnings" class="dictionary-composer-warning-list is-hidden" aria-label="Generation rule warnings"></div>
+      <button
+        id="dictionaryComposerCancelBtn"
+        class="dictionary-composer-btn"
+        type="button"
+      >
+        Cancel
+      </button>
+    </div>
+  `;
+
+  syncManualComposerUiState();
+}
+
+function syncManualComposerUiState() {
+  if (!manualComposerState.isOpen || !dictionaryComposer) {
+    return;
+  }
+
+  const validation = manualComposerState.validation || createManualComposerValidation();
+  const fieldErrors = manualComposerState.fieldErrors || createManualComposerFieldErrors();
+  const warningMessages = getManualComposerWarningMessages(validation);
+  const hasRuleWarning = warningMessages.length > 0;
+  const saveDisabled = manualComposerState.saveStatus === "saving" || !isDictionaryConfigured;
+
+  if (manualComposerState.openWarningIndex >= warningMessages.length) {
+    manualComposerState.openWarningIndex = -1;
+  }
+
+  dictionaryComposer.classList.toggle("has-rule-warning", hasRuleWarning);
+
+  const saveButton = document.getElementById("dictionaryComposerSaveBtn");
+  if (saveButton) {
+    saveButton.disabled = saveDisabled;
+    saveButton.textContent = getManualComposerSaveLabel();
+  }
+
+  const cancelButton = document.getElementById("dictionaryComposerCancelBtn");
+  if (cancelButton) {
+    cancelButton.disabled = manualComposerState.saveStatus === "saving";
+  }
+
+  const warningsNode = document.getElementById("dictionaryComposerWarnings");
+  if (warningsNode) {
+    warningsNode.classList.toggle("is-hidden", !hasRuleWarning);
+    warningsNode.innerHTML = hasRuleWarning
+      ? warningMessages
+          .map((warning, index) => {
+            const isOpen = manualComposerState.openWarningIndex === index;
+            return `
+              <span class="dictionary-warning-item${isOpen ? " is-open" : ""}" data-warning-item>
+                <button
+                  type="button"
+                  class="dictionary-warning-badge"
+                  data-warning-badge
+                  data-warning-index="${index}"
+                  aria-label="${escapeXml(warning)}"
+                  aria-describedby="dictionaryComposerWarningTooltip${index}"
+                  aria-expanded="${isOpen ? "true" : "false"}"
+                  ${manualComposerState.saveStatus === "saving" ? "disabled" : ""}
+                >
+                  ⚠
+                </button>
+                <span
+                  id="dictionaryComposerWarningTooltip${index}"
+                  class="dictionary-warning-tooltip"
+                  role="tooltip"
+                >${escapeXml(warning)}</span>
+              </span>
+            `;
+          })
+          .join("")
+      : "";
+  }
+
+  const wordInput = document.getElementById("dictionaryComposerWord");
+  const pronunciationInput = document.getElementById("dictionaryComposerPronunciation");
+  const meaningInput = document.getElementById("dictionaryComposerMeaning");
+  const disableFields = manualComposerState.saveStatus === "saving";
+
+  if (wordInput) {
+    wordInput.disabled = disableFields;
+  }
+
+  if (pronunciationInput) {
+    pronunciationInput.disabled = disableFields;
+  }
+
+  if (meaningInput) {
+    meaningInput.disabled = disableFields;
+  }
+
+  syncManualComposerFieldNode("word", wordInput, fieldErrors.word);
+  syncManualComposerFieldNode("pronunciation", pronunciationInput, fieldErrors.pronunciation);
+  syncManualComposerFieldNode("meaning", meaningInput, fieldErrors.meaning);
+}
+
+function syncManualComposerFieldNode(fieldName, input, errorMessage) {
+  const field = dictionaryComposer.querySelector(`[data-composer-field="${fieldName}"]`);
+  const errorNode = document.getElementById(`${getManualComposerInputId(fieldName)}Error`);
+  const hasError = Boolean(trimOrEmpty(errorMessage));
+
+  if (field) {
+    field.classList.toggle("is-invalid", hasError);
+  }
+
+  if (input) {
+    input.setAttribute("aria-invalid", hasError ? "true" : "false");
+  }
+
+  if (errorNode) {
+    errorNode.textContent = hasError ? errorMessage : "";
+  }
 }
 
 function getHistoryEntriesForGroup(group) {
@@ -807,6 +1182,7 @@ function refreshDictionaryView(options = {}) {
   const preferredWord = trimOrEmpty(options.preferredWord);
 
   rebuildVisibleGroups();
+  renderManualComposer();
 
   if (!dictionaryList) {
     updateSentinelVisibility();
@@ -982,6 +1358,72 @@ function closeMeaningEditor(word) {
   refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: word });
 }
 
+function resetManualComposer() {
+  manualComposerState.isOpen = false;
+  manualComposerState.word = "";
+  manualComposerState.pronunciation = "";
+  manualComposerState.meaning = "";
+  manualComposerState.validation = createManualComposerValidation();
+  manualComposerState.fieldErrors = createManualComposerFieldErrors();
+  manualComposerState.hasAttemptedSave = false;
+  manualComposerState.openWarningIndex = -1;
+  manualComposerState.saveStatus = "idle";
+}
+
+function openManualComposer() {
+  manualComposerState.isOpen = true;
+  manualComposerState.word = "";
+  manualComposerState.pronunciation = "";
+  manualComposerState.meaning = "";
+  manualComposerState.fieldErrors = createManualComposerFieldErrors();
+  manualComposerState.hasAttemptedSave = false;
+  manualComposerState.openWarningIndex = -1;
+  manualComposerState.saveStatus = "idle";
+  syncManualComposerValidation();
+  syncManualComposerFieldErrors();
+  selectedWord = "";
+  refreshDictionaryView({ preserveCount: renderedGroupCount });
+
+  window.requestAnimationFrame(() => {
+    const input = document.getElementById("dictionaryComposerWord");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  });
+}
+
+function closeManualComposer() {
+  resetManualComposer();
+  refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
+}
+
+function findCurrentUserRecordByWord(word) {
+  const normalizedWord = trimOrEmpty(word);
+  if (!normalizedWord || !currentUserId) {
+    return null;
+  }
+
+  const matches = [];
+  for (const record of recordsById.values()) {
+    if (trimOrEmpty(record.word) !== normalizedWord) {
+      continue;
+    }
+
+    if (!matchesCurrentUserRecord(record)) {
+      continue;
+    }
+
+    matches.push(record);
+  }
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  return sortRecordsByActivityDesc(matches)[0] || null;
+}
+
 async function putDictionaryRecord(record) {
   const currentHeartsClient = getHeartsTableClient();
   if (!isDictionaryConfigured || !currentHeartsClient) {
@@ -998,18 +1440,24 @@ async function putDictionaryRecord(record) {
     .promise();
 }
 
-async function ensureEditableCurrentUserRecord(group) {
+async function ensureEditableCurrentUserRecord(group, overrides = {}) {
   const identityId = await ensureCurrentUserIdentity();
-  if (group.currentUserRecord) {
-    group.currentUserRecord.user = identityId;
+  const normalizedWord = trimOrEmpty(overrides.word || (group && group.word));
+  const normalizedPronunciation = trimOrEmpty(
+    overrides.pronunciation || (group && group.pronunciation)
+  );
+  const existingRecord = findCurrentUserRecordByWord(normalizedWord);
+
+  if (existingRecord) {
+    existingRecord.user = identityId;
     return {
-      record: group.currentUserRecord,
+      record: existingRecord,
       created: false
     };
   }
 
   const now = Date.now();
-  const rowId = buildCanonicalRecordRowId(identityId, group.word);
+  const rowId = buildCanonicalRecordRowId(identityId, normalizedWord);
   const record = {
     id: buildEntryId(rowId, now),
     rowId,
@@ -1017,8 +1465,8 @@ async function ensureEditableCurrentUserRecord(group) {
     updatedTimestamp: now,
     unheartedTimestamp: null,
     user: identityId,
-    word: group.word,
-    pronunciation: group.pronunciation,
+    word: normalizedWord,
+    pronunciation: normalizedPronunciation,
     meaning: null,
     hearted: false,
     copyFlash: false
@@ -1160,6 +1608,97 @@ async function handleSaveMeaning(word) {
   }
 }
 
+async function handleSaveManualWord() {
+  if (!isDictionaryConfigured || manualComposerState.saveStatus === "saving") {
+    return;
+  }
+
+  const word = trimOrEmpty(manualComposerState.word);
+  const pronunciation = trimOrEmpty(manualComposerState.pronunciation);
+  const meaning = trimOrEmpty(manualComposerState.meaning);
+
+  manualComposerState.hasAttemptedSave = true;
+  manualComposerState.openWarningIndex = -1;
+  syncManualComposerFieldErrors();
+  syncManualComposerValidation();
+  syncManualComposerUiState();
+
+  const firstInvalidField = getFirstManualComposerInvalidField();
+  if (firstInvalidField) {
+    focusManualComposerField(firstInvalidField);
+    return;
+  }
+
+  const previousCount = renderedGroupCount;
+  const previousFilter = activeFilter;
+  manualComposerState.saveStatus = "saving";
+  syncManualComposerValidation();
+  syncManualComposerUiState();
+
+  let createdRecordId = "";
+  let snapshot = null;
+
+  try {
+    const ensured = await ensureEditableCurrentUserRecord(null, { word, pronunciation });
+    const record = ensured.record;
+    createdRecordId = ensured.created ? record.id : "";
+    snapshot = {
+      word: record.word,
+      pronunciation: record.pronunciation,
+      meaning: record.meaning,
+      hearted: record.hearted,
+      updatedTimestamp: record.updatedTimestamp,
+      unheartedTimestamp: record.unheartedTimestamp,
+      user: record.user
+    };
+
+    const now = Date.now();
+    record.user = currentUserId;
+    record.word = word;
+    record.pronunciation = pronunciation;
+    record.meaning = meaning;
+    record.hearted = true;
+    record.updatedTimestamp = now;
+    record.unheartedTimestamp = null;
+
+    await putDictionaryRecord(record);
+
+    rebuildGroupsFromEntries();
+    const nextGroup = getGroupByWord(word);
+    if (nextGroup && !isGroupVisible(nextGroup)) {
+      activeFilter = FILTERS.DEFINED;
+    }
+
+    selectedWord = word;
+    resetManualComposer();
+    setStatus("");
+    refreshDictionaryView({ preserveCount: previousCount, preferredWord: word });
+  } catch (error) {
+    if (createdRecordId) {
+      clearCopyFeedback(createdRecordId);
+      recordsById.delete(createdRecordId);
+    } else if (snapshot) {
+      const record = findCurrentUserRecordByWord(word);
+      if (record) {
+        record.word = snapshot.word;
+        record.pronunciation = snapshot.pronunciation;
+        record.meaning = snapshot.meaning;
+        record.hearted = snapshot.hearted;
+        record.updatedTimestamp = snapshot.updatedTimestamp;
+        record.unheartedTimestamp = snapshot.unheartedTimestamp;
+        record.user = snapshot.user;
+      }
+    }
+
+    activeFilter = previousFilter;
+    manualComposerState.saveStatus = "idle";
+    syncManualComposerValidation();
+    syncManualComposerUiState();
+    setStatus("Failed to save manual word.", "error");
+    console.error("Failed to save manual dictionary word.", error);
+  }
+}
+
 function handleMeaningInput(event) {
   const input = event.target.closest(".meaning-input");
   if (!input) {
@@ -1205,6 +1744,97 @@ function handleMeaningInputKeydown(event) {
   if (event.key === "Escape") {
     event.preventDefault();
     closeMeaningEditor(word);
+  }
+}
+
+function handleManualComposerInput(event) {
+  if (!manualComposerState.isOpen || !dictionaryComposer || !dictionaryComposer.contains(event.target)) {
+    return;
+  }
+
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  if (target.id === "dictionaryComposerWord") {
+    manualComposerState.word = target.value;
+  } else if (target.id === "dictionaryComposerPronunciation") {
+    manualComposerState.pronunciation = target.value;
+  } else if (target.id === "dictionaryComposerMeaning") {
+    manualComposerState.meaning = target.value;
+  } else {
+    return;
+  }
+
+  syncManualComposerFieldErrors();
+  syncManualComposerValidation();
+  syncManualComposerUiState();
+}
+
+function handleManualComposerKeydown(event) {
+  if (!manualComposerState.isOpen || !dictionaryComposer || !dictionaryComposer.contains(event.target)) {
+    return;
+  }
+
+  if (event.key === "Enter") {
+    if (
+      event.target instanceof Element &&
+      (event.target.closest("[data-warning-badge]") ||
+        event.target.closest("#dictionaryComposerCancelBtn"))
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleSaveManualWord();
+    return;
+  }
+
+  if (event.key === "Escape") {
+    if (manualComposerState.openWarningIndex >= 0) {
+      event.preventDefault();
+      closeManualComposerWarningTooltip();
+      return;
+    }
+
+    if (manualComposerState.saveStatus !== "saving") {
+      event.preventDefault();
+      closeManualComposer();
+    }
+  }
+}
+
+function handleManualComposerClick(event) {
+  if (!manualComposerState.isOpen || !dictionaryComposer || !dictionaryComposer.contains(event.target)) {
+    return;
+  }
+
+  const warningBadge = event.target.closest("[data-warning-badge]");
+  if (warningBadge) {
+    event.preventDefault();
+    const nextIndex = Number(warningBadge.dataset.warningIndex);
+    if (!Number.isInteger(nextIndex) || nextIndex < 0) {
+      return;
+    }
+
+    manualComposerState.openWarningIndex =
+      manualComposerState.openWarningIndex === nextIndex ? -1 : nextIndex;
+    syncManualComposerUiState();
+    return;
+  }
+
+  const saveButton = event.target.closest("#dictionaryComposerSaveBtn");
+  if (saveButton) {
+    event.preventDefault();
+    void handleSaveManualWord();
+    return;
+  }
+
+  const cancelButton = event.target.closest("#dictionaryComposerCancelBtn");
+  if (cancelButton) {
+    event.preventDefault();
+    closeManualComposer();
   }
 }
 
@@ -1312,6 +1942,19 @@ function handleMyHeartsToggleClick() {
   refreshDictionaryView({ preserveCount: renderedGroupCount, preferredWord: selectedWord });
 }
 
+function handleAddWordButtonClick() {
+  if (!isDictionaryConfigured) {
+    return;
+  }
+
+  if (manualComposerState.isOpen) {
+    closeManualComposer();
+    return;
+  }
+
+  openManualComposer();
+}
+
 async function loadDictionary() {
   if (!dictionaryList || !dictionaryStatus) {
     return;
@@ -1359,6 +2002,7 @@ async function loadDictionary() {
 }
 
 updateFilterControls();
+renderManualComposer();
 
 sharedAudio.addEventListener("ended", () => {
   playingRecordId = "";
@@ -1377,6 +2021,16 @@ if (myHeartsToggle) {
   myHeartsToggle.addEventListener("click", handleMyHeartsToggleClick);
 }
 
+if (addWordButton) {
+  addWordButton.addEventListener("click", handleAddWordButtonClick);
+}
+
+if (dictionaryComposer) {
+  dictionaryComposer.addEventListener("click", handleManualComposerClick);
+  dictionaryComposer.addEventListener("input", handleManualComposerInput);
+  dictionaryComposer.addEventListener("keydown", handleManualComposerKeydown);
+}
+
 if (dictionaryList) {
   dictionaryList.addEventListener("click", (event) => {
     void handleDictionaryListClick(event);
@@ -1387,7 +2041,17 @@ if (dictionaryList) {
 }
 
 document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  if (!event.target.closest("[data-warning-item]")) {
+    closeManualComposerWarningTooltip();
+  }
+
   if (
+    event.target.closest("#dictionaryComposer") ||
+    event.target.closest("#dictionaryAddWordBtn") ||
     event.target.closest(".dictionary-entry") ||
     event.target.closest(".dictionary-history-toggle") ||
     event.target.closest(".dictionary-filter-btn") ||
@@ -1398,6 +2062,19 @@ document.addEventListener("click", (event) => {
 
   selectedWord = "";
   refreshDictionaryView({ preserveCount: renderedGroupCount });
+});
+
+window.addEventListener("storage", (event) => {
+  if (!event || event.key !== activeRulesStorageKey) {
+    return;
+  }
+
+  if (!manualComposerState.isOpen) {
+    return;
+  }
+
+  syncManualComposerValidation();
+  syncManualComposerUiState();
 });
 
 window.addEventListener("beforeunload", () => {
