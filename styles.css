@@ -827,6 +827,13 @@ h2 {
   transform: translateX(0);
 }
 
+.settings-display-row.is-selected .settings-icon-btn,
+.settings-display-row.is-selected .settings-delete-btn {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
 .settings-display-row:hover .settings-icon-btn,
 .settings-display-row:hover .settings-delete-btn,
 .settings-display-row:focus-within .settings-icon-btn,

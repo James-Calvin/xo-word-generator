@@ -115,6 +115,7 @@
   let pendingDeleteKey = "";
   let pendingFocusRowId = "";
   let pendingFocusFieldName = "";
+  let selectedSettingsRowId = "";
   let uiState = createUiStateFromDraftConfig();
 
   function capitalizeLabel(value) {
@@ -377,6 +378,43 @@
     uiState = createUiStateFromDraftConfig();
     pendingFocusRowId = "";
     pendingFocusFieldName = "";
+    selectedSettingsRowId = "";
+  }
+
+  function syncSelectedDisplayRows() {
+    if (!app) {
+      return;
+    }
+
+    const rows = app.querySelectorAll(".settings-display-row[data-row-id]");
+    for (const row of rows) {
+      row.classList.toggle("is-selected", trimOrEmpty(row.dataset.rowId) === selectedSettingsRowId);
+    }
+  }
+
+  function clearSelectedSettingsRow() {
+    if (!selectedSettingsRowId) {
+      return false;
+    }
+
+    selectedSettingsRowId = "";
+    syncSelectedDisplayRows();
+    return true;
+  }
+
+  function setSelectedSettingsRow(rowId) {
+    const normalizedRowId = trimOrEmpty(rowId);
+    if (!normalizedRowId) {
+      return clearSelectedSettingsRow();
+    }
+
+    if (selectedSettingsRowId === normalizedRowId) {
+      return false;
+    }
+
+    selectedSettingsRowId = normalizedRowId;
+    syncSelectedDisplayRows();
+    return true;
   }
 
   function findUiRow(rowId) {
@@ -589,7 +627,7 @@
 
   function renderDisplayRow(row, summaryHtml) {
     return `
-      <div class="rule-row settings-display-row result-row" data-row-id="${escapeHtml(row.rowId)}">
+      <div class="rule-row settings-display-row result-row${selectedSettingsRowId === row.rowId ? " is-selected" : ""}" data-row-id="${escapeHtml(row.rowId)}">
         <div class="row-actions settings-display-actions">
           ${renderIconButton({
             action: "edit-row",
@@ -891,6 +929,7 @@
     renderBanList("wordEndBans", wordEndBansList);
     renderKnownSymbolOptions();
     renderStatus();
+    syncSelectedDisplayRows();
     syncPendingDeleteButtons();
     applyPendingFocus();
   }
@@ -907,6 +946,10 @@
       row.draftValue = row.isNew
         ? row.draftValue || createBlankDraftValue(row.kind)
         : createDraftValueFromPersisted(row.kind, getPersistedValueForRow(row));
+    }
+
+    if (selectedSettingsRowId === row.rowId) {
+      selectedSettingsRowId = "";
     }
 
     setPendingFocusRow(row.rowId);
@@ -1049,6 +1092,9 @@
 
     list.splice(match.row.sourceIndex, 1);
     match.rows.splice(match.rowIndex, 1);
+    if (selectedSettingsRowId === trimOrEmpty(rowId)) {
+      selectedSettingsRowId = "";
+    }
     pendingDeleteKey = "";
     importFeedbackMessage = "";
     importFeedbackIsError = false;
@@ -1136,6 +1182,13 @@
 
   function handleClick(event) {
     event.__settingsHandledInApp = true;
+    const clickedDisplayRow = event.target.closest(".settings-display-row[data-row-id]");
+    if (clickedDisplayRow) {
+      setSelectedSettingsRow(clickedDisplayRow.dataset.rowId);
+    } else {
+      clearSelectedSettingsRow();
+    }
+
     const savedAnyRows = saveEditingRowsOutsideTarget(event.target, { render: false });
 
     const deleteButton = event.target.closest(".settings-delete-btn[data-action='delete-row']");
@@ -1249,8 +1302,12 @@
 
     const target = event.target;
     if (!(target instanceof Element)) {
-      if (saveEditingRowsOutsideTarget(null)) {
-        return;
+      const savedAnyRows = saveEditingRowsOutsideTarget(null, { render: false });
+      const clearedSelection = clearSelectedSettingsRow();
+      if (savedAnyRows) {
+        renderAll();
+      } else if (clearedSelection) {
+        syncSelectedDisplayRows();
       }
       if (!pendingDeleteKey) {
         return;
@@ -1264,6 +1321,7 @@
     }
 
     const savedAnyRows = saveEditingRowsOutsideTarget(target, { render: false });
+    clearSelectedSettingsRow();
     if (savedAnyRows) {
       renderAll();
     }
