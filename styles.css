@@ -541,29 +541,75 @@ h2 {
 
 .settings-delete-btn {
   border: none;
-  border-radius: 10px;
-  background: none;
-  color: var(--text-main);
-  font: inherit;
-  font-weight: 700;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  padding: 0.56rem 0.82rem;
   transition:
     color 0.18s ease,
-    border-color 0.18s ease,
     background-color 0.18s ease,
-    box-shadow 0.18s ease;
+    box-shadow 0.18s ease,
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+
+.settings-icon-btn {
+  width: 1.95rem;
+  height: 1.95rem;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease,
+    box-shadow 0.18s ease,
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+
+.settings-icon-btn::before {
+  content: "";
+  width: 1rem;
+  height: 1rem;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
+
+.settings-icon-btn.is-edit::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a9bfd6' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h9'/%3E%3Cpath d='M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z'/%3E%3C/svg%3E");
+}
+
+.settings-icon-btn.is-save::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2387d8ff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.2 4.2L19 7.5'/%3E%3C/svg%3E");
+}
+
+.settings-icon-btn.is-cancel::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a9bfd6' stroke-width='2.1' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12'/%3E%3Cpath d='M18 6L6 18'/%3E%3C/svg%3E");
+}
+
+.settings-btn:hover,
+.settings-btn:focus-visible {
+  border-color: rgba(0, 153, 255, 0.42);
 }
 
 .settings-btn:hover,
 .settings-btn:focus-visible,
+.settings-icon-btn:hover,
+.settings-icon-btn:focus-visible,
 .settings-delete-btn:hover,
 .settings-delete-btn:focus-visible {
-  border-color: rgba(0, 153, 255, 0.42);
   color: var(--text-main);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .settings-btn:focus-visible,
+.settings-icon-btn:focus-visible,
 .settings-delete-btn:focus-visible,
 .settings-link-btn:focus-visible,
 .settings-field:focus-visible {
@@ -725,8 +771,108 @@ h2 {
   flex: 1 1 0;
 }
 
-.rule-row-symbol .settings-delete-btn {
+.settings-edit-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
   margin-left: auto;
+  align-self: flex-end;
+}
+
+.settings-display-row {
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.8rem;
+  padding: 0.45rem 0.5rem;
+  background: transparent;
+}
+
+.settings-display-row + .settings-display-row {
+  margin-top: 0;
+}
+
+.settings-display-row .row-actions,
+.settings-display-row .row-copy {
+  width: 2.15rem;
+  flex: 0 0 2.15rem;
+  min-height: 2rem;
+}
+
+.settings-display-row .row-actions {
+  justify-content: flex-start;
+}
+
+.settings-display-row .row-copy {
+  justify-content: flex-end;
+}
+
+.settings-display-row .settings-icon-btn,
+.settings-display-row .settings-delete-btn {
+  opacity: 0;
+  visibility: visible;
+  pointer-events: none;
+}
+
+.settings-display-row .settings-icon-btn {
+  transform: translateX(-4px);
+}
+
+.settings-display-row .settings-delete-btn {
+  transform: translateX(4px);
+}
+
+.settings-display-row .settings-delete-btn.is-pending-delete {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.settings-display-row:hover .settings-icon-btn,
+.settings-display-row:hover .settings-delete-btn,
+.settings-display-row:focus-within .settings-icon-btn,
+.settings-display-row:focus-within .settings-delete-btn,
+.settings-display-row .settings-icon-btn:focus-visible,
+.settings-display-row .settings-delete-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.settings-display-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.settings-summary-segment {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.settings-summary-label {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.settings-summary-value {
+  min-width: 0;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.settings-summary-value.ipa {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.settings-summary-separator {
+  color: var(--text-muted);
 }
 
 .settings-field-group {
@@ -769,14 +915,14 @@ h2 {
 
 .settings-delete-btn {
   flex: 0 0 auto;
-  width: 2.45rem;
-  height: 2.45rem;
+  width: 1.95rem;
+  height: 1.95rem;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: flex-end;
-  border-radius: 999px;
+  align-self: center;
+  border-radius: 8px;
 }
 
 .settings-delete-btn::before {
@@ -790,7 +936,6 @@ h2 {
 }
 
 .settings-delete-btn.is-pending-delete {
-  border-color: rgba(255, 79, 95, 0.48);
   background: rgba(255, 79, 95, 0.14);
   box-shadow: inset 0 0 0 1px rgba(255, 79, 95, 0.16);
 }
@@ -1478,7 +1623,27 @@ h2 {
     align-items: stretch;
   }
 
+  .settings-edit-actions {
+    width: 100%;
+    justify-content: flex-end;
+    margin-left: 0;
+  }
+
+  .settings-display-row {
+    align-items: flex-start;
+  }
+
+  .settings-display-row .row-actions,
+  .settings-display-row .row-copy {
+    width: 2.05rem;
+    flex: 0 0 2.05rem;
+  }
+
+  .settings-display-content {
+    flex: 1 1 0;
+  }
+
   .settings-delete-btn {
-    width: 2.45rem;
+    width: 1.95rem;
   }
 }

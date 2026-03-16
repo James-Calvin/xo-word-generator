@@ -1,4 +1,6 @@
 (function bootstrapSettingsPage(globalScope) {
+  "use strict";
+
   const sharedApi = globalScope.LOVE_LANGUAGE_SHARED || {};
   const sharedUtils = sharedApi.utils || {};
   const rulesApi = globalScope.LOVE_LANGUAGE_RULES || {};
@@ -17,6 +19,10 @@
             .replaceAll(">", "&gt;")
             .replaceAll('"', "&quot;")
             .replaceAll("'", "&apos;");
+  const createRowId =
+    typeof sharedUtils.createRowId === "function"
+      ? sharedUtils.createRowId
+      : () => `row-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   const TRANSITION_SCOPES = Array.isArray(rulesApi.TRANSITION_SCOPES)
     ? rulesApi.TRANSITION_SCOPES
@@ -25,13 +31,9 @@
     ? rulesApi.SYLLABLE_PATTERN_KEYS
     : ["single", "initial", "medial", "final"];
   const loadDraftRuleConfig =
-    typeof rulesApi.loadDraftRuleConfig === "function"
-      ? rulesApi.loadDraftRuleConfig
-      : () => null;
+    typeof rulesApi.loadDraftRuleConfig === "function" ? rulesApi.loadDraftRuleConfig : () => null;
   const loadActiveRuleConfig =
-    typeof rulesApi.loadActiveRuleConfig === "function"
-      ? rulesApi.loadActiveRuleConfig
-      : () => null;
+    typeof rulesApi.loadActiveRuleConfig === "function" ? rulesApi.loadActiveRuleConfig : () => null;
   const createBlankRuleConfig =
     typeof rulesApi.createBlankRuleConfig === "function"
       ? rulesApi.createBlankRuleConfig
@@ -39,12 +41,7 @@
           version: 1,
           vowels: [],
           consonants: [],
-          syllablePatterns: {
-            single: [],
-            initial: [],
-            medial: [],
-            final: []
-          },
+          syllablePatterns: { single: [], initial: [], medial: [], final: [] },
           transitionRules: [],
           wordEndBans: [],
           syllableEndBans: []
@@ -78,6 +75,21 @@
   const draftStorageKey = typeof storageKeys.draft === "string" ? storageKeys.draft : "";
   const activeStorageKey = typeof storageKeys.active === "string" ? storageKeys.active : "";
 
+  const ROW_KINDS = {
+    INVENTORY: "inventory",
+    PATTERN: "pattern",
+    TRANSITION: "transition",
+    BAN: "ban"
+  };
+  const PATTERN_SECTION_KEY = "syllablePatterns";
+  const SECTION_DEFINITIONS = [
+    { sectionKey: "vowels", kind: ROW_KINDS.INVENTORY },
+    { sectionKey: "consonants", kind: ROW_KINDS.INVENTORY },
+    { sectionKey: "transitionRules", kind: ROW_KINDS.TRANSITION },
+    { sectionKey: "syllableEndBans", kind: ROW_KINDS.BAN },
+    { sectionKey: "wordEndBans", kind: ROW_KINDS.BAN }
+  ];
+
   const app = document.querySelector(".app-settings");
   const importRulesBtn = document.getElementById("importRulesBtn");
   const exportRulesBtn = document.getElementById("exportRulesBtn");
@@ -101,14 +113,17 @@
   let importFeedbackMessage = "";
   let importFeedbackIsError = false;
   let pendingDeleteKey = "";
+  let pendingFocusRowId = "";
+  let pendingFocusFieldName = "";
+  let uiState = createUiStateFromDraftConfig();
 
   function capitalizeLabel(value) {
     const normalizedValue = trimOrEmpty(value);
-    if (!normalizedValue) {
-      return "";
-    }
+    return normalizedValue ? normalizedValue.charAt(0).toUpperCase() + normalizedValue.slice(1) : "";
+  }
 
-    return normalizedValue.charAt(0).toUpperCase() + normalizedValue.slice(1);
+  function hasVisibleText(value) {
+    return trimOrEmpty(value).length > 0;
   }
 
   function getPatternLabel(key) {
@@ -143,61 +158,41 @@
     }
   }
 
-  function buildDeleteKey({ kind, section = "", patternKey = "", index }) {
-    return [trimOrEmpty(kind), trimOrEmpty(section), trimOrEmpty(patternKey), String(index)].join("|");
+  function getDisplayValue(value) {
+    const normalizedValue = trimOrEmpty(value);
+    return normalizedValue || "(empty)";
   }
 
-  function getDeleteKeyFromButton(button) {
-    if (!button) {
-      return "";
+  function getPatternEmptyMessage(patternKey) {
+    return `No ${getPatternLabel(patternKey).toLowerCase()} patterns yet.`;
+  }
+
+  function getRowLabel(row) {
+    if (!row) {
+      return "row";
     }
 
-    return buildDeleteKey({
-      kind: button.dataset.kind,
-      section: button.dataset.section,
-      patternKey: button.dataset.patternKey,
-      index: button.dataset.index
-    });
+    if (row.kind === ROW_KINDS.INVENTORY) {
+      return row.sectionKey === "vowels" ? "vowel" : "consonant";
+    }
+
+    if (row.kind === ROW_KINDS.PATTERN) {
+      return `${getPatternLabel(row.patternKey).toLowerCase()} pattern`;
+    }
+
+    if (row.kind === ROW_KINDS.TRANSITION) {
+      return "transition rule";
+    }
+
+    return row.sectionKey === "syllableEndBans" ? "syllable-end ban" : "word-end ban";
   }
 
   function getDeleteButtonText(isPendingDelete) {
     return isPendingDelete ? "Confirm delete" : "Delete row";
   }
 
-  function renderDeleteButton({ kind, section = "", patternKey = "", index }) {
-    const deleteKey = buildDeleteKey({ kind, section, patternKey, index });
-    const isPendingDelete = pendingDeleteKey === deleteKey;
-
-    return `
-      <button
-        class="settings-delete-btn${isPendingDelete ? " is-pending-delete" : ""}"
-        type="button"
-        data-action="delete-row"
-        data-kind="${escapeHtml(kind)}"
-        ${section ? `data-section="${escapeHtml(section)}"` : ""}
-        ${patternKey ? `data-pattern-key="${escapeHtml(patternKey)}"` : ""}
-        data-index="${index}"
-        data-delete-key="${escapeHtml(deleteKey)}"
-        aria-label="${getDeleteButtonText(isPendingDelete)}"
-        title="${getDeleteButtonText(isPendingDelete)}"
-      ></button>
-    `;
-  }
-
-  function syncPendingDeleteButtons() {
-    if (!app) {
-      return;
-    }
-
-    const buttons = app.querySelectorAll(".settings-delete-btn[data-delete-key]");
-    for (const button of buttons) {
-      const buttonKey = trimOrEmpty(button.dataset.deleteKey);
-      const isPendingDelete = Boolean(buttonKey) && buttonKey === pendingDeleteKey;
-      const label = getDeleteButtonText(isPendingDelete);
-      button.classList.toggle("is-pending-delete", isPendingDelete);
-      button.setAttribute("aria-label", label);
-      button.setAttribute("title", label);
-    }
+  function buildDeleteKey(rowId) {
+    return trimOrEmpty(rowId);
   }
 
   function clearPendingDeleteState() {
@@ -207,6 +202,321 @@
 
     pendingDeleteKey = "";
     syncPendingDeleteButtons();
+  }
+
+  function createEmptyUiState() {
+    return {
+      vowels: [],
+      consonants: [],
+      transitionRules: [],
+      syllableEndBans: [],
+      wordEndBans: [],
+      syllablePatterns: { single: [], initial: [], medial: [], final: [] }
+    };
+  }
+
+  function createBlankDraftValue(kind) {
+    if (kind === ROW_KINDS.INVENTORY) {
+      return { symbol: "", ipa: "" };
+    }
+
+    if (kind === ROW_KINDS.TRANSITION) {
+      return { scope: TRANSITION_SCOPES[0] || "word", triggerSymbol: "", blockedNextSymbols: "" };
+    }
+
+    if (kind === ROW_KINDS.BAN) {
+      return { symbol: "" };
+    }
+
+    return "";
+  }
+
+  function createDraftValueFromPersisted(kind, persistedValue) {
+    if (kind === ROW_KINDS.INVENTORY) {
+      return {
+        symbol: persistedValue && typeof persistedValue === "object" ? persistedValue.symbol || "" : "",
+        ipa: persistedValue && typeof persistedValue === "object" ? persistedValue.ipa || "" : ""
+      };
+    }
+
+    if (kind === ROW_KINDS.PATTERN) {
+      return typeof persistedValue === "string" ? persistedValue : "";
+    }
+
+    if (kind === ROW_KINDS.TRANSITION) {
+      return {
+        scope:
+          persistedValue && TRANSITION_SCOPES.includes(persistedValue.scope)
+            ? persistedValue.scope
+            : TRANSITION_SCOPES[0] || "word",
+        triggerSymbol:
+          persistedValue && typeof persistedValue === "object" ? persistedValue.triggerSymbol || "" : "",
+        blockedNextSymbols:
+          persistedValue &&
+          typeof persistedValue === "object" &&
+          Array.isArray(persistedValue.blockedNextSymbols)
+            ? persistedValue.blockedNextSymbols.join(", ")
+            : ""
+      };
+    }
+
+    return { symbol: typeof persistedValue === "string" ? persistedValue : "" };
+  }
+
+  function createSavedRow(kind, { sectionKey = "", patternKey = "", sourceIndex }) {
+    return { rowId: createRowId(), kind, sectionKey, patternKey, sourceIndex, isNew: false, isEditing: false, draftValue: null };
+  }
+
+  function createNewRow(kind, { sectionKey = "", patternKey = "" }) {
+    return {
+      rowId: createRowId(),
+      kind,
+      sectionKey,
+      patternKey,
+      sourceIndex: -1,
+      isNew: true,
+      isEditing: true,
+      draftValue: createBlankDraftValue(kind)
+    };
+  }
+
+  function getPersistedList(sectionKey, patternKey = "") {
+    if (sectionKey === PATTERN_SECTION_KEY) {
+      draftConfig.syllablePatterns = draftConfig.syllablePatterns || {};
+      if (!Array.isArray(draftConfig.syllablePatterns[patternKey])) {
+        draftConfig.syllablePatterns[patternKey] = [];
+      }
+      return draftConfig.syllablePatterns[patternKey];
+    }
+
+    if (!Array.isArray(draftConfig[sectionKey])) {
+      draftConfig[sectionKey] = [];
+    }
+
+    return draftConfig[sectionKey];
+  }
+
+  function getUiRows(sectionKey, patternKey = "") {
+    return sectionKey === PATTERN_SECTION_KEY ? uiState.syllablePatterns[patternKey] : uiState[sectionKey];
+  }
+
+  function getPersistedValueForRow(row) {
+    if (!row || row.isNew || row.sourceIndex < 0) {
+      return null;
+    }
+
+    const list = getPersistedList(row.sectionKey, row.patternKey);
+    return list[row.sourceIndex] ?? null;
+  }
+
+  function createUiStateFromDraftConfig() {
+    const nextState = createEmptyUiState();
+
+    for (const definition of SECTION_DEFINITIONS) {
+      nextState[definition.sectionKey] = getPersistedList(definition.sectionKey).map((entry, index) =>
+        createSavedRow(definition.kind, { sectionKey: definition.sectionKey, sourceIndex: index })
+      );
+    }
+
+    for (const patternKey of SYLLABLE_PATTERN_KEYS) {
+      nextState.syllablePatterns[patternKey] = getPersistedList(PATTERN_SECTION_KEY, patternKey).map(
+        (pattern, index) =>
+          createSavedRow(ROW_KINDS.PATTERN, {
+            sectionKey: PATTERN_SECTION_KEY,
+            patternKey,
+            sourceIndex: index
+          })
+      );
+    }
+
+    return nextState;
+  }
+
+  function reconcileUiRows(previousRows, definition) {
+    const persistedLength = getPersistedList(definition.sectionKey, definition.patternKey).length;
+    const savedRows = previousRows.filter((row) => !row.isNew);
+    const unsavedRows = previousRows.filter((row) => row.isNew);
+    const nextRows = [];
+
+    for (let index = 0; index < persistedLength; index += 1) {
+      const existingRow = savedRows[index];
+      nextRows.push(
+        existingRow
+          ? { ...existingRow, sectionKey: definition.sectionKey, patternKey: definition.patternKey || "", sourceIndex: index, isNew: false }
+          : createSavedRow(definition.kind, {
+              sectionKey: definition.sectionKey,
+              patternKey: definition.patternKey,
+              sourceIndex: index
+            })
+      );
+    }
+
+    nextRows.push(...unsavedRows);
+    return nextRows;
+  }
+
+  function reconcileUiStateWithDraftConfig() {
+    const nextState = createEmptyUiState();
+
+    for (const definition of SECTION_DEFINITIONS) {
+      nextState[definition.sectionKey] = reconcileUiRows(uiState[definition.sectionKey], definition);
+    }
+
+    for (const patternKey of SYLLABLE_PATTERN_KEYS) {
+      nextState.syllablePatterns[patternKey] = reconcileUiRows(uiState.syllablePatterns[patternKey], {
+        kind: ROW_KINDS.PATTERN,
+        sectionKey: PATTERN_SECTION_KEY,
+        patternKey
+      });
+    }
+
+    uiState = nextState;
+  }
+
+  function resetUiStateFromDraftConfig() {
+    uiState = createUiStateFromDraftConfig();
+    pendingFocusRowId = "";
+    pendingFocusFieldName = "";
+  }
+
+  function findUiRow(rowId) {
+    const normalizedRowId = trimOrEmpty(rowId);
+    if (!normalizedRowId) {
+      return null;
+    }
+
+    for (const definition of SECTION_DEFINITIONS) {
+      const rows = uiState[definition.sectionKey];
+      const rowIndex = rows.findIndex((row) => row.rowId === normalizedRowId);
+      if (rowIndex >= 0) {
+        return { row: rows[rowIndex], rows, rowIndex };
+      }
+    }
+
+    for (const patternKey of SYLLABLE_PATTERN_KEYS) {
+      const rows = uiState.syllablePatterns[patternKey];
+      const rowIndex = rows.findIndex((row) => row.rowId === normalizedRowId);
+      if (rowIndex >= 0) {
+        return { row: rows[rowIndex], rows, rowIndex };
+      }
+    }
+
+    return null;
+  }
+
+  function getEditingRowIds() {
+    const rowIds = [];
+
+    for (const definition of SECTION_DEFINITIONS) {
+      rowIds.push(...uiState[definition.sectionKey].filter((row) => row.isEditing).map((row) => row.rowId));
+    }
+
+    for (const patternKey of SYLLABLE_PATTERN_KEYS) {
+      rowIds.push(...uiState.syllablePatterns[patternKey].filter((row) => row.isEditing).map((row) => row.rowId));
+    }
+
+    return rowIds;
+  }
+
+  function setPendingFocusRow(rowId, fieldName = "") {
+    pendingFocusRowId = trimOrEmpty(rowId);
+    pendingFocusFieldName = trimOrEmpty(fieldName);
+  }
+
+  function syncPendingDeleteButtons() {
+    if (!app) {
+      return;
+    }
+
+    const buttons = app.querySelectorAll(".settings-delete-btn[data-delete-key]");
+    for (const button of buttons) {
+      const isPendingDelete = trimOrEmpty(button.dataset.deleteKey) === pendingDeleteKey;
+      const label = getDeleteButtonText(isPendingDelete);
+      button.classList.toggle("is-pending-delete", isPendingDelete);
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+    }
+  }
+
+  function applyPendingFocus() {
+    const rowId = trimOrEmpty(pendingFocusRowId);
+    if (!rowId || !app) {
+      return;
+    }
+
+    const fieldName = trimOrEmpty(pendingFocusFieldName);
+    pendingFocusRowId = "";
+    pendingFocusFieldName = "";
+    globalScope.requestAnimationFrame(() => {
+      const row = app.querySelector(`[data-row-id="${rowId}"]`);
+      const focusTarget =
+        row && fieldName
+          ? row.querySelector(`[data-field="${fieldName}"]`)
+          : row
+            ? row.querySelector("input, select, textarea")
+            : null;
+      if (!(focusTarget instanceof HTMLElement)) {
+        return;
+      }
+
+      focusTarget.focus();
+      if (focusTarget instanceof HTMLInputElement || focusTarget instanceof HTMLTextAreaElement) {
+        focusTarget.setSelectionRange(focusTarget.value.length, focusTarget.value.length);
+      }
+    });
+  }
+
+  function persistDraftState() {
+    const result = applyDraftRuleConfig(draftConfig);
+    draftConfig = cloneRuleConfig(result.draft);
+    activeConfig = cloneRuleConfig(result.active);
+    draftValidation = result.validation;
+  }
+
+  function parseBlockedSymbolInput(value) {
+    const parts = String(value)
+      .split(",")
+      .map((part) => trimOrEmpty(part));
+    return parts.length === 0 ? [""] : parts;
+  }
+
+  function createPersistedValueFromDraft(row) {
+    if (row.kind === ROW_KINDS.INVENTORY) {
+      return { symbol: row.draftValue.symbol || "", ipa: row.draftValue.ipa || "" };
+    }
+
+    if (row.kind === ROW_KINDS.PATTERN) {
+      return typeof row.draftValue === "string" ? row.draftValue : "";
+    }
+
+    if (row.kind === ROW_KINDS.TRANSITION) {
+      return {
+        scope: row.draftValue.scope,
+        triggerSymbol: row.draftValue.triggerSymbol,
+        blockedNextSymbols: parseBlockedSymbolInput(row.draftValue.blockedNextSymbols)
+      };
+    }
+
+    return row.draftValue.symbol || "";
+  }
+
+  function updateRowDraftFromField(row, fieldName, value) {
+    if (!row || !row.isEditing) {
+      return;
+    }
+
+    if (row.kind === ROW_KINDS.PATTERN) {
+      if (fieldName === "pattern") {
+        row.draftValue = value;
+      }
+      return;
+    }
+
+    if (!row.draftValue || typeof row.draftValue !== "object") {
+      row.draftValue = createBlankDraftValue(row.kind);
+    }
+
+    row.draftValue[fieldName] = value;
   }
 
   function getKnownSymbols() {
@@ -231,63 +541,268 @@
       return;
     }
 
-    const optionsHtml = getKnownSymbols()
+    knownRuleSymbols.innerHTML = getKnownSymbols()
       .map((symbol) => `<option value="${escapeHtml(symbol)}"></option>`)
       .join("");
+  }
 
-    knownRuleSymbols.innerHTML = optionsHtml;
+  function renderIconButton({ action, rowId, className, label }) {
+    return `
+      <button
+        class="settings-icon-btn ${escapeHtml(className)}"
+        type="button"
+        data-action="${escapeHtml(action)}"
+        data-row-id="${escapeHtml(rowId)}"
+        aria-label="${escapeHtml(label)}"
+        title="${escapeHtml(label)}"
+      ></button>
+    `;
+  }
+
+  function renderDeleteButton(rowId) {
+    const deleteKey = buildDeleteKey(rowId);
+    const isPendingDelete = pendingDeleteKey === deleteKey;
+
+    return `
+      <button
+        class="settings-delete-btn${isPendingDelete ? " is-pending-delete" : ""}"
+        type="button"
+        data-action="delete-row"
+        data-row-id="${escapeHtml(rowId)}"
+        data-delete-key="${escapeHtml(deleteKey)}"
+        aria-label="${getDeleteButtonText(isPendingDelete)}"
+        title="${getDeleteButtonText(isPendingDelete)}"
+      ></button>
+    `;
+  }
+
+  function renderSummarySegment(label, value, extraClassName = "") {
+    return `
+      <span class="settings-summary-segment">
+        ${label ? `<span class="settings-summary-label">${escapeHtml(label)}</span>` : ""}
+        <span class="settings-summary-value${extraClassName ? ` ${escapeHtml(extraClassName)}` : ""}">${escapeHtml(
+          value
+        )}</span>
+      </span>
+    `;
+  }
+
+  function renderDisplayRow(row, summaryHtml) {
+    return `
+      <div class="rule-row settings-display-row result-row" data-row-id="${escapeHtml(row.rowId)}">
+        <div class="row-actions settings-display-actions">
+          ${renderIconButton({
+            action: "edit-row",
+            rowId: row.rowId,
+            className: "is-edit",
+            label: `Edit ${getRowLabel(row)}`
+          })}
+        </div>
+        <div class="row-content settings-display-content">${summaryHtml}</div>
+        <div class="row-copy settings-display-delete">${renderDeleteButton(row.rowId)}</div>
+      </div>
+    `;
+  }
+
+  function renderEditActions(row) {
+    return `
+      <div class="settings-edit-actions">
+        ${renderIconButton({
+          action: "save-row",
+          rowId: row.rowId,
+          className: "is-save",
+          label: `Save ${getRowLabel(row)}`
+        })}
+        ${renderIconButton({
+          action: "cancel-row",
+          rowId: row.rowId,
+          className: "is-cancel",
+          label: `Cancel ${getRowLabel(row)} edit`
+        })}
+      </div>
+    `;
+  }
+
+  function renderInventoryRow(row) {
+    if (row.isEditing) {
+      const draftValue =
+        row.draftValue && typeof row.draftValue === "object"
+          ? row.draftValue
+          : createBlankDraftValue(ROW_KINDS.INVENTORY);
+
+      return `
+        <div class="rule-row rule-row-symbol settings-edit-row" data-row-id="${escapeHtml(row.rowId)}">
+          <label class="settings-field-group">
+            <span class="settings-field-label">Symbol</span>
+            <input
+              class="settings-field"
+              type="text"
+              value="${escapeHtml(draftValue.symbol || "")}"
+              data-field="symbol"
+              autocomplete="off"
+            >
+          </label>
+          <label class="settings-field-group">
+            <span class="settings-field-label">IPA</span>
+            <input
+              class="settings-field"
+              type="text"
+              value="${escapeHtml(draftValue.ipa || "")}"
+              data-field="ipa"
+              autocomplete="off"
+            >
+          </label>
+          ${renderEditActions(row)}
+        </div>
+      `;
+    }
+
+    const entry = getPersistedValueForRow(row) || {};
+    return renderDisplayRow(
+      row,
+      `
+        ${renderSummarySegment("", getDisplayValue(entry.symbol))}
+        ${renderSummarySegment("", `/${getDisplayValue(entry.ipa)}/`, "ipa")}
+      `
+    );
+  }
+
+  function renderPatternRow(row) {
+    if (row.isEditing) {
+      const draftValue = typeof row.draftValue === "string" ? row.draftValue : "";
+
+      return `
+        <div class="rule-row settings-edit-row" data-row-id="${escapeHtml(row.rowId)}">
+          <label class="settings-field-group">
+            <span class="settings-field-label">Pattern</span>
+            <input
+              class="settings-field"
+              type="text"
+              value="${escapeHtml(draftValue)}"
+              data-field="pattern"
+              autocomplete="off"
+              spellcheck="false"
+            >
+          </label>
+          ${renderEditActions(row)}
+        </div>
+      `;
+    }
+
+    return renderDisplayRow(
+      row,
+      renderSummarySegment("", getDisplayValue(getPersistedValueForRow(row)))
+    );
+  }
+
+  function renderTransitionRow(row) {
+    if (row.isEditing) {
+      const draftValue =
+        row.draftValue && typeof row.draftValue === "object"
+          ? row.draftValue
+          : createBlankDraftValue(ROW_KINDS.TRANSITION);
+
+      return `
+        <div class="rule-row rule-row-transition settings-edit-row" data-row-id="${escapeHtml(row.rowId)}">
+          <label class="settings-field-group">
+            <span class="settings-field-label">Scope</span>
+            <select class="settings-field" data-field="scope">
+              ${TRANSITION_SCOPES.map(
+                (scope) => `
+                  <option value="${scope}"${draftValue.scope === scope ? " selected" : ""}>${escapeHtml(
+                    capitalizeLabel(scope)
+                  )}</option>
+                `
+              ).join("")}
+            </select>
+          </label>
+          <label class="settings-field-group">
+            <span class="settings-field-label">Trigger</span>
+            <input
+              class="settings-field"
+              type="text"
+              value="${escapeHtml(draftValue.triggerSymbol || "")}"
+              data-field="triggerSymbol"
+              list="knownRuleSymbols"
+              autocomplete="off"
+            >
+          </label>
+          <label class="settings-field-group settings-field-group-wide">
+            <span class="settings-field-label">Blocked next symbols</span>
+            <input
+              class="settings-field"
+              type="text"
+              value="${escapeHtml(draftValue.blockedNextSymbols || "")}"
+              data-field="blockedNextSymbols"
+              list="knownRuleSymbols"
+              autocomplete="off"
+            >
+          </label>
+          ${renderEditActions(row)}
+        </div>
+      `;
+    }
+
+    const persistedRule = getPersistedValueForRow(row) || {};
+    const blockedValue = Array.isArray(persistedRule.blockedNextSymbols)
+      ? persistedRule.blockedNextSymbols.filter(Boolean).join(", ")
+      : "";
+
+    return renderDisplayRow(
+      row,
+      `
+        ${renderSummarySegment("", getDisplayValue(capitalizeLabel(persistedRule.scope || "")))}
+        <span class="settings-summary-separator">|</span>
+        ${renderSummarySegment("Trigger:", getDisplayValue(persistedRule.triggerSymbol))}
+        <span class="settings-summary-separator">|</span>
+        ${renderSummarySegment("Blocked:", getDisplayValue(blockedValue))}
+      `
+    );
+  }
+
+  function renderBanRow(row) {
+    if (row.isEditing) {
+      const draftValue =
+        row.draftValue && typeof row.draftValue === "object"
+          ? row.draftValue
+          : createBlankDraftValue(ROW_KINDS.BAN);
+
+      return `
+        <div class="rule-row rule-row-ban settings-edit-row" data-row-id="${escapeHtml(row.rowId)}">
+          <label class="settings-field-group settings-field-group-wide">
+            <span class="settings-field-label">Symbol</span>
+            <input
+              class="settings-field"
+              type="text"
+              value="${escapeHtml(draftValue.symbol || "")}"
+              data-field="symbol"
+              list="knownRuleSymbols"
+              autocomplete="off"
+            >
+          </label>
+          ${renderEditActions(row)}
+        </div>
+      `;
+    }
+
+    return renderDisplayRow(
+      row,
+      renderSummarySegment("", getDisplayValue(getPersistedValueForRow(row)))
+    );
   }
 
   function renderInventoryList(sectionKey, container) {
-    const entries = Array.isArray(draftConfig[sectionKey]) ? draftConfig[sectionKey] : [];
+    const rows = getUiRows(sectionKey);
     if (!container) {
       return;
     }
 
-    if (entries.length === 0) {
+    if (rows.length === 0) {
       container.innerHTML = `<p class="settings-empty">${escapeHtml(getEmptyMessage(sectionKey))}</p>`;
       return;
     }
 
-    container.innerHTML = entries
-      .map(
-        (entry, index) => `
-          <div class="rule-row rule-row-symbol" data-kind="inventory" data-section="${sectionKey}" data-index="${index}">
-            <label class="settings-field-group">
-              <span class="settings-field-label">Symbol</span>
-              <input
-                class="settings-field"
-                type="text"
-                value="${escapeHtml(entry.symbol || "")}"
-                data-kind="inventory"
-                data-section="${sectionKey}"
-                data-index="${index}"
-                data-field="symbol"
-                autocomplete="off"
-              >
-            </label>
-            <label class="settings-field-group">
-              <span class="settings-field-label">IPA</span>
-              <input
-                class="settings-field"
-                type="text"
-                value="${escapeHtml(entry.ipa || "")}"
-                data-kind="inventory"
-                data-section="${sectionKey}"
-                data-index="${index}"
-                data-field="ipa"
-                autocomplete="off"
-              >
-            </label>
-            ${renderDeleteButton({
-              kind: "inventory",
-              section: sectionKey,
-              index
-            })}
-          </div>
-        `
-      )
-      .join("");
+    container.innerHTML = rows.map((row) => renderInventoryRow(row)).join("");
   }
 
   function renderPatternGrid() {
@@ -295,50 +810,22 @@
       return;
     }
 
-    syllablePatternsGrid.innerHTML = SYLLABLE_PATTERN_KEYS.map((key) => {
-      const patterns =
-        draftConfig.syllablePatterns && Array.isArray(draftConfig.syllablePatterns[key])
-          ? draftConfig.syllablePatterns[key]
-          : [];
+    syllablePatternsGrid.innerHTML = SYLLABLE_PATTERN_KEYS.map((patternKey) => {
+      const rows = getUiRows(PATTERN_SECTION_KEY, patternKey);
       const rowsHtml =
-        patterns.length === 0
-          ? `<p class="settings-empty">No ${escapeHtml(getPatternLabel(key).toLowerCase())} patterns yet.</p>`
-          : patterns
-              .map(
-                (pattern, index) => `
-                  <div class="rule-row rule-row-pattern" data-kind="pattern" data-pattern-key="${key}" data-index="${index}">
-                    <label class="settings-field-group">
-                      <span class="settings-field-label">Pattern</span>
-                      <input
-                        class="settings-field"
-                        type="text"
-                        value="${escapeHtml(pattern || "")}"
-                        data-kind="pattern"
-                        data-pattern-key="${key}"
-                        data-index="${index}"
-                        autocomplete="off"
-                        spellcheck="false"
-                      >
-                    </label>
-                    ${renderDeleteButton({
-                      kind: "pattern",
-                      patternKey: key,
-                      index
-                    })}
-                  </div>
-                `
-              )
-              .join("");
+        rows.length === 0
+          ? `<p class="settings-empty">${escapeHtml(getPatternEmptyMessage(patternKey))}</p>`
+          : rows.map((row) => renderPatternRow(row)).join("");
 
       return `
         <div class="settings-pattern-card">
           <div class="settings-subsection-header">
-            <h3>${escapeHtml(getPatternLabel(key))}</h3>
+            <h3>${escapeHtml(getPatternLabel(patternKey))}</h3>
           </div>
           <p class="settings-pattern-help">Use only C and V tokens.</p>
           <div class="rule-list">${rowsHtml}</div>
           <div class="settings-list-footer">
-            <button class="settings-link-btn" type="button" data-action="add-pattern" data-pattern-key="${key}">Add pattern</button>
+            <button class="settings-link-btn" type="button" data-action="add-pattern" data-pattern-key="${patternKey}">Add pattern</button>
           </div>
         </div>
       `;
@@ -346,107 +833,31 @@
   }
 
   function renderTransitionRules() {
-    const rules = Array.isArray(draftConfig.transitionRules) ? draftConfig.transitionRules : [];
+    const rows = getUiRows("transitionRules");
     if (!transitionRulesList) {
       return;
     }
 
-    if (rules.length === 0) {
+    if (rows.length === 0) {
       transitionRulesList.innerHTML = `<p class="settings-empty">${escapeHtml(getEmptyMessage("transitionRules"))}</p>`;
       return;
     }
 
-    transitionRulesList.innerHTML = rules
-      .map((rule, index) => {
-        const blockedValue = Array.isArray(rule.blockedNextSymbols)
-          ? rule.blockedNextSymbols.join(", ")
-          : "";
-
-        return `
-          <div class="rule-row rule-row-transition" data-kind="transition" data-index="${index}">
-            <label class="settings-field-group">
-              <span class="settings-field-label">Scope</span>
-              <select class="settings-field" data-kind="transition" data-index="${index}" data-field="scope">
-                ${TRANSITION_SCOPES.map(
-                  (scope) => `
-                    <option value="${scope}"${rule.scope === scope ? " selected" : ""}>${escapeHtml(capitalizeLabel(scope))}</option>
-                  `
-                ).join("")}
-              </select>
-            </label>
-            <label class="settings-field-group">
-              <span class="settings-field-label">Trigger</span>
-              <input
-                class="settings-field"
-                type="text"
-                value="${escapeHtml(rule.triggerSymbol || "")}"
-                data-kind="transition"
-                data-index="${index}"
-                data-field="triggerSymbol"
-                list="knownRuleSymbols"
-                autocomplete="off"
-              >
-            </label>
-            <label class="settings-field-group settings-field-group-wide">
-              <span class="settings-field-label">Blocked next symbols</span>
-              <input
-                class="settings-field"
-                type="text"
-                value="${escapeHtml(blockedValue)}"
-                data-kind="transition"
-                data-index="${index}"
-                data-field="blockedNextSymbols"
-                list="knownRuleSymbols"
-                autocomplete="off"
-              >
-            </label>
-            ${renderDeleteButton({
-              kind: "transition",
-              index
-            })}
-          </div>
-        `;
-      })
-      .join("");
+    transitionRulesList.innerHTML = rows.map((row) => renderTransitionRow(row)).join("");
   }
 
   function renderBanList(sectionKey, container) {
-    const bans = Array.isArray(draftConfig[sectionKey]) ? draftConfig[sectionKey] : [];
+    const rows = getUiRows(sectionKey);
     if (!container) {
       return;
     }
 
-    if (bans.length === 0) {
+    if (rows.length === 0) {
       container.innerHTML = `<p class="settings-empty">${escapeHtml(getEmptyMessage(sectionKey))}</p>`;
       return;
     }
 
-    container.innerHTML = bans
-      .map(
-        (symbol, index) => `
-          <div class="rule-row rule-row-ban" data-kind="ban" data-section="${sectionKey}" data-index="${index}">
-            <label class="settings-field-group settings-field-group-wide">
-              <span class="settings-field-label">Symbol</span>
-              <input
-                class="settings-field"
-                type="text"
-                value="${escapeHtml(symbol || "")}"
-                data-kind="ban"
-                data-section="${sectionKey}"
-                data-index="${index}"
-                list="knownRuleSymbols"
-                autocomplete="off"
-              >
-            </label>
-            ${renderDeleteButton({
-              kind: "ban",
-              section: sectionKey,
-              index
-            })}
-          </div>
-        `
-      )
-      .join("");
+    container.innerHTML = rows.map((row) => renderBanRow(row)).join("");
   }
 
   function renderStatus() {
@@ -459,9 +870,7 @@
     }
 
     if (errorList) {
-      errorList.innerHTML = draftValidation.errors
-        .map((error) => `<li>${escapeHtml(error)}</li>`)
-        .join("");
+      errorList.innerHTML = draftValidation.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("");
       errorList.classList.toggle("is-hidden", draftValidation.errors.length === 0);
     }
 
@@ -469,15 +878,8 @@
       importStatus.textContent = importFeedbackMessage;
       importStatus.classList.toggle("is-hidden", !hasVisibleText(importFeedbackMessage));
       importStatus.classList.toggle("is-error", importFeedbackIsError);
-      importStatus.classList.toggle(
-        "is-success",
-        hasVisibleText(importFeedbackMessage) && !importFeedbackIsError
-      );
+      importStatus.classList.toggle("is-success", hasVisibleText(importFeedbackMessage) && !importFeedbackIsError);
     }
-  }
-
-  function hasVisibleText(value) {
-    return trimOrEmpty(value).length > 0;
   }
 
   function renderAll() {
@@ -489,138 +891,170 @@
     renderBanList("wordEndBans", wordEndBansList);
     renderKnownSymbolOptions();
     renderStatus();
+    syncPendingDeleteButtons();
+    applyPendingFocus();
   }
 
-  function persistDraftState() {
-    const result = applyDraftRuleConfig(draftConfig);
-    draftConfig = cloneRuleConfig(result.draft);
-    activeConfig = cloneRuleConfig(result.active);
-    draftValidation = result.validation;
-    renderKnownSymbolOptions();
-    renderStatus();
-  }
+  function openRowEditor(rowId) {
+    const match = findUiRow(rowId);
+    if (!match) {
+      return;
+    }
 
-  function persistDraftAndRender() {
-    persistDraftState();
+    const { row } = match;
+    if (!row.isEditing) {
+      row.isEditing = true;
+      row.draftValue = row.isNew
+        ? row.draftValue || createBlankDraftValue(row.kind)
+        : createDraftValueFromPersisted(row.kind, getPersistedValueForRow(row));
+    }
+
+    setPendingFocusRow(row.rowId);
     renderAll();
   }
 
-  function pushBlankRow(sectionKey) {
-    if (sectionKey === "transitionRules") {
-      draftConfig.transitionRules.push({
-        scope: TRANSITION_SCOPES[0],
-        triggerSymbol: "",
-        blockedNextSymbols: [""]
-      });
+  function addRowForSection(sectionKey) {
+    const definition = SECTION_DEFINITIONS.find((item) => item.sectionKey === sectionKey);
+    if (!definition) {
       return;
     }
 
-    if (sectionKey === "vowels" || sectionKey === "consonants") {
-      draftConfig[sectionKey].push({ symbol: "", ipa: "" });
-      return;
-    }
-
-    if (sectionKey === "syllableEndBans" || sectionKey === "wordEndBans") {
-      draftConfig[sectionKey].push("");
-    }
+    clearPendingDeleteState();
+    const row = createNewRow(definition.kind, { sectionKey });
+    getUiRows(sectionKey).push(row);
+    setPendingFocusRow(row.rowId);
+    renderAll();
   }
 
-  function pushBlankPattern(patternKey) {
-    if (!draftConfig.syllablePatterns || !Array.isArray(draftConfig.syllablePatterns[patternKey])) {
-      draftConfig.syllablePatterns[patternKey] = [];
-    }
-
-    draftConfig.syllablePatterns[patternKey].push("");
+  function addPatternRow(patternKey) {
+    clearPendingDeleteState();
+    const row = createNewRow(ROW_KINDS.PATTERN, { sectionKey: PATTERN_SECTION_KEY, patternKey });
+    getUiRows(PATTERN_SECTION_KEY, patternKey).push(row);
+    setPendingFocusRow(row.rowId);
+    renderAll();
   }
 
-  function deleteRow(button) {
-    const kind = trimOrEmpty(button.dataset.kind);
-    const index = Number(button.dataset.index);
-    if (!Number.isInteger(index) || index < 0) {
+  function cancelRow(rowId) {
+    const match = findUiRow(rowId);
+    if (!match || !match.row.isEditing) {
       return;
     }
 
-    if (kind === "inventory" || kind === "ban") {
-      const sectionKey = trimOrEmpty(button.dataset.section);
-      if (Array.isArray(draftConfig[sectionKey])) {
-        draftConfig[sectionKey].splice(index, 1);
-      }
-      return;
+    clearPendingDeleteState();
+
+    if (match.row.isNew) {
+      match.rows.splice(match.rowIndex, 1);
+    } else {
+      match.row.isEditing = false;
+      match.row.draftValue = null;
     }
 
-    if (kind === "pattern") {
-      const patternKey = trimOrEmpty(button.dataset.patternKey);
-      if (
-        draftConfig.syllablePatterns &&
-        Array.isArray(draftConfig.syllablePatterns[patternKey])
-      ) {
-        draftConfig.syllablePatterns[patternKey].splice(index, 1);
-      }
-      return;
-    }
-
-    if (kind === "transition" && Array.isArray(draftConfig.transitionRules)) {
-      draftConfig.transitionRules.splice(index, 1);
-    }
+    renderAll();
   }
 
-  function parseBlockedSymbolInput(value) {
-    const parts = String(value).split(",").map((part) => trimOrEmpty(part));
-    return parts.length === 0 ? [""] : parts;
+  function saveRow(rowId, options = {}) {
+    const match = findUiRow(rowId);
+    if (!match || !match.row.isEditing) {
+      return false;
+    }
+
+    const { row } = match;
+    const list = getPersistedList(row.sectionKey, row.patternKey);
+    const nextValue = createPersistedValueFromDraft(row);
+
+    clearPendingDeleteState();
+
+    if (row.isNew) {
+      row.sourceIndex = list.length;
+      row.isNew = false;
+      list.push(nextValue);
+    } else if (row.sourceIndex >= 0 && row.sourceIndex < list.length) {
+      list[row.sourceIndex] = nextValue;
+    } else {
+      return false;
+    }
+
+    row.isEditing = false;
+    row.draftValue = null;
+
+    persistDraftState();
+    reconcileUiStateWithDraftConfig();
+
+    if (options.clearFeedback !== false) {
+      importFeedbackMessage = "";
+      importFeedbackIsError = false;
+    }
+
+    if (options.render !== false) {
+      renderAll();
+    }
+
+    return true;
   }
 
-  function updateDraftFromField(field) {
-    const kind = trimOrEmpty(field.dataset.kind);
-    const index = Number(field.dataset.index);
-    if (!Number.isInteger(index) || index < 0) {
+  function saveAllEditingRows(options = {}) {
+    const rowIds = getEditingRowIds();
+    if (rowIds.length === 0) {
+      return false;
+    }
+
+    for (const rowId of rowIds) {
+      saveRow(rowId, { render: false, clearFeedback: false });
+    }
+
+    if (options.render !== false) {
+      renderAll();
+    }
+
+    return true;
+  }
+
+  function saveEditingRowsOutsideTarget(target, options = {}) {
+    const targetElement = target instanceof Element ? target : null;
+    const activeEditRow = targetElement ? targetElement.closest(".settings-edit-row[data-row-id]") : null;
+    const activeRowId = activeEditRow ? trimOrEmpty(activeEditRow.dataset.rowId) : "";
+    const activeField = targetElement ? targetElement.closest("[data-field]") : null;
+    const activeFieldName = activeField ? trimOrEmpty(activeField.dataset.field) : "";
+    const rowIdsToSave = getEditingRowIds().filter((rowId) => rowId !== activeRowId);
+
+    if (rowIdsToSave.length === 0) {
+      return false;
+    }
+
+    for (const rowId of rowIdsToSave) {
+      saveRow(rowId, { render: false, clearFeedback: false });
+    }
+
+    if (activeRowId && options.preserveActiveFocus !== false) {
+      setPendingFocusRow(activeRowId, activeFieldName);
+    }
+
+    if (options.render !== false) {
+      renderAll();
+    }
+
+    return true;
+  }
+
+  function deleteRowById(rowId) {
+    const match = findUiRow(rowId);
+    if (!match || match.row.isNew || match.row.isEditing) {
       return;
     }
 
-    if (kind === "inventory") {
-      const sectionKey = trimOrEmpty(field.dataset.section);
-      const propertyName = trimOrEmpty(field.dataset.field);
-      if (
-        Array.isArray(draftConfig[sectionKey]) &&
-        draftConfig[sectionKey][index] &&
-        typeof draftConfig[sectionKey][index] === "object"
-      ) {
-        draftConfig[sectionKey][index][propertyName] = field.value;
-      }
+    const list = getPersistedList(match.row.sectionKey, match.row.patternKey);
+    if (match.row.sourceIndex < 0 || match.row.sourceIndex >= list.length) {
       return;
     }
 
-    if (kind === "pattern") {
-      const patternKey = trimOrEmpty(field.dataset.patternKey);
-      if (
-        draftConfig.syllablePatterns &&
-        Array.isArray(draftConfig.syllablePatterns[patternKey])
-      ) {
-        draftConfig.syllablePatterns[patternKey][index] = field.value;
-      }
-      return;
-    }
-
-    if (kind === "transition") {
-      const propertyName = trimOrEmpty(field.dataset.field);
-      const rule = draftConfig.transitionRules[index];
-      if (!rule) {
-        return;
-      }
-
-      if (propertyName === "blockedNextSymbols") {
-        rule.blockedNextSymbols = parseBlockedSymbolInput(field.value);
-      } else {
-        rule[propertyName] = field.value;
-      }
-      return;
-    }
-
-    if (kind === "ban") {
-      const sectionKey = trimOrEmpty(field.dataset.section);
-      if (Array.isArray(draftConfig[sectionKey])) {
-        draftConfig[sectionKey][index] = field.value;
-      }
-    }
+    list.splice(match.row.sourceIndex, 1);
+    match.rows.splice(match.rowIndex, 1);
+    pendingDeleteKey = "";
+    importFeedbackMessage = "";
+    importFeedbackIsError = false;
+    persistDraftState();
+    reconcileUiStateWithDraftConfig();
+    renderAll();
   }
 
   async function handleImportRules() {
@@ -636,11 +1070,12 @@
     try {
       const fileText = await file.text();
       const importedConfig = normalizeRuleConfig(JSON.parse(fileText));
-      draftConfig = cloneRuleConfig(importedConfig);
-      const result = applyDraftRuleConfig(draftConfig);
+      const result = applyDraftRuleConfig(importedConfig);
       draftConfig = cloneRuleConfig(result.draft);
       activeConfig = cloneRuleConfig(result.active);
       draftValidation = result.validation;
+      resetUiStateFromDraftConfig();
+      clearPendingDeleteState();
       importFeedbackIsError = !result.applied;
       importFeedbackMessage = result.applied
         ? `Imported rules from ${file.name}.`
@@ -657,6 +1092,9 @@
   }
 
   function handleExportRules() {
+    clearPendingDeleteState();
+    saveAllEditingRows({ render: false });
+
     const configToExport = normalizeRuleConfig(draftConfig);
     const json = JSON.stringify(configToExport, null, 2);
     const blob = new Blob([json], { type: "application/json" });
@@ -671,41 +1109,44 @@
 
     importFeedbackIsError = false;
     importFeedbackMessage = "Exported the current draft rules.";
-    renderStatus();
+    renderAll();
   }
 
   function handleBlankSlate() {
+    clearPendingDeleteState();
     draftConfig = createBlankRuleConfig();
-    activeConfig = cloneRuleConfig(loadActiveRuleConfig());
+    persistDraftState();
+    resetUiStateFromDraftConfig();
     importFeedbackIsError = false;
     importFeedbackMessage = "Saved a blank draft. Add valid rules to apply it.";
-    persistDraftAndRender();
+    renderAll();
   }
 
   function handleRestoreDefaults() {
+    clearPendingDeleteState();
     const restoredConfig = restoreDefaultRuleConfig();
     draftConfig = cloneRuleConfig(restoredConfig);
     activeConfig = cloneRuleConfig(restoredConfig);
     draftValidation = validateRuleConfig(draftConfig);
+    resetUiStateFromDraftConfig();
     importFeedbackIsError = false;
     importFeedbackMessage = "Restored the default generator rules.";
     renderAll();
   }
 
   function handleClick(event) {
+    event.__settingsHandledInApp = true;
+    const savedAnyRows = saveEditingRowsOutsideTarget(event.target, { render: false });
+
     const deleteButton = event.target.closest(".settings-delete-btn[data-action='delete-row']");
     if (deleteButton) {
-      const deleteKey = getDeleteKeyFromButton(deleteButton);
+      const deleteKey = buildDeleteKey(deleteButton.dataset.rowId || deleteButton.dataset.deleteKey);
       if (!deleteKey) {
         return;
       }
 
       if (pendingDeleteKey === deleteKey) {
-        deleteRow(deleteButton);
-        pendingDeleteKey = "";
-        importFeedbackMessage = "";
-        importFeedbackIsError = false;
-        persistDraftAndRender();
+        deleteRowById(trimOrEmpty(deleteButton.dataset.rowId));
         return;
       }
 
@@ -716,50 +1157,73 @@
 
     if (pendingDeleteKey) {
       clearPendingDeleteState();
+      if (savedAnyRows) {
+        renderAll();
+      }
       return;
     }
 
     const actionButton = event.target.closest("[data-action], [data-add-section]");
     if (!actionButton) {
+      if (savedAnyRows) {
+        renderAll();
+      }
       return;
     }
 
     const action = trimOrEmpty(actionButton.dataset.action);
     const addSection = trimOrEmpty(actionButton.dataset.addSection);
+    const rowId = trimOrEmpty(actionButton.dataset.rowId);
 
     if (addSection) {
-      pushBlankRow(addSection);
-      importFeedbackMessage = "";
-      importFeedbackIsError = false;
-      persistDraftAndRender();
+      addRowForSection(addSection);
       return;
     }
 
     if (action === "add-pattern") {
-      pushBlankPattern(trimOrEmpty(actionButton.dataset.patternKey));
-      importFeedbackMessage = "";
-      importFeedbackIsError = false;
-      persistDraftAndRender();
+      addPatternRow(trimOrEmpty(actionButton.dataset.patternKey));
       return;
     }
 
-    if (action === "delete-row") {
-      deleteRow(actionButton);
-      importFeedbackMessage = "";
-      importFeedbackIsError = false;
-      persistDraftAndRender();
+    if (action === "edit-row") {
+      openRowEditor(rowId);
+      return;
+    }
+
+    if (action === "save-row") {
+      saveRow(rowId);
+      return;
+    }
+
+    if (action === "cancel-row") {
+      cancelRow(rowId);
+      return;
+    }
+
+    if (savedAnyRows) {
+      renderAll();
     }
   }
 
   function handleInput(event) {
-    const field = event.target.closest("[data-kind]");
-    if (!field || field.matches("button")) {
+    const target = event.target;
+    if (!(target instanceof Element) || target.matches("button")) {
+      return;
+    }
+
+    const field = target.closest("[data-field]");
+    const rowElement = target.closest("[data-row-id]");
+    if (!field || !rowElement) {
+      return;
+    }
+
+    const match = findUiRow(trimOrEmpty(rowElement.dataset.rowId));
+    if (!match || !match.row.isEditing) {
       return;
     }
 
     clearPendingDeleteState();
-    updateDraftFromField(field);
-    persistDraftState();
+    updateRowDraftFromField(match.row, trimOrEmpty(field.dataset.field), target.value);
   }
 
   function handleFocusIn(event) {
@@ -779,13 +1243,32 @@
   }
 
   function handleDocumentClick(event) {
-    if (!pendingDeleteKey) {
+    if (event.__settingsHandledInApp) {
       return;
     }
 
     const target = event.target;
     if (!(target instanceof Element)) {
+      if (saveEditingRowsOutsideTarget(null)) {
+        return;
+      }
+      if (!pendingDeleteKey) {
+        return;
+      }
       clearPendingDeleteState();
+      return;
+    }
+
+    if (app && app.contains(target)) {
+      return;
+    }
+
+    const savedAnyRows = saveEditingRowsOutsideTarget(target, { render: false });
+    if (savedAnyRows) {
+      renderAll();
+    }
+
+    if (!pendingDeleteKey) {
       return;
     }
 
@@ -802,6 +1285,8 @@
     draftConfig = cloneRuleConfig(loadDraftRuleConfig());
     activeConfig = cloneRuleConfig(loadActiveRuleConfig());
     draftValidation = validateRuleConfig(draftConfig);
+    resetUiStateFromDraftConfig();
+    clearPendingDeleteState();
     importFeedbackMessage = "Rules updated in another tab.";
     importFeedbackIsError = false;
     renderAll();
